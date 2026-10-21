@@ -1,0 +1,13 @@
+[
+ {
+  "file": "ranker_0.txt",
+  "drop": []
+ },
+ {
+  "file": "ranker_1.txt",
+  "drop": [
+   "k_pre",
+   "k_pre_rank"
+  ]
+ }
+]

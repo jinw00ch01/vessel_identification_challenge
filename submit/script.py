@@ -29,26 +29,38 @@ def resolve(relative: str) -> Path:
     raise FileNotFoundError(relative)
 
 
+def rank_scores(X: np.ndarray) -> np.ndarray:
+    """Average of the rankers listed in views.json, each on its own feature view."""
+    with open(BASE / "model" / "views.json", encoding="utf-8") as fh:
+        views = json.load(fh)
+    total = np.zeros(len(X))
+    for view in views:
+        booster = lgb.Booster(model_file=str(BASE / "model" / view["file"]))
+        Xv = X.copy()
+        Xv[:, [vlib.COL[f] for f in view["drop"]]] = np.nan
+        total += booster.predict(Xv)
+    return total / len(views)
+
+
 def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
     with open(BASE / "model" / "tables.json", encoding="utf-8") as fh:
         tables = json.load(fh)
-    booster = lgb.Booster(model_file=str(BASE / "model" / "ranker.txt"))
-    index = vlib.CatalogIndex(catalog, tables)
     rows = test.to_dict("records")
-    cands, feats = vlib.build_matrix(index, rows)
-    sizes = [len(c) for c in cands]
-    scores = booster.predict(np.vstack(feats)) if sum(sizes) else np.zeros(0)
-    preds, offset = [], 0
-    for row, cand in zip(rows, cands):
+    known = set(catalog["vessel_id"].astype(str))
+    # A call sign seen in train decides the row on its own; rank the rest.
+    preds = [vlib.lookup_prediction(tables, row) for row in rows]
+    preds = [p if p in known else None for p in preds]
+    todo = [k for k, p in enumerate(preds) if p is None]
+    if not todo:
+        return preds
+    index = vlib.CatalogIndex(catalog, tables)
+    cands, feats = vlib.build_matrix(index, [rows[k] for k in todo])
+    scores = rank_scores(np.vstack(feats)) if sum(len(c) for c in cands) else np.zeros(0)
+    offset = 0
+    for k, cand in zip(todo, cands):
         local = scores[offset: offset + len(cand)]
         offset += len(cand)
-        hit = vlib.lookup_prediction(tables, row)
-        if hit is not None and hit in index.id_to_index:
-            preds.append(hit)
-        elif len(cand):
-            preds.append(index.ids[cand[int(np.argmax(local))]])
-        else:
-            preds.append(index.ids[0])
+        preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]
     return preds
 
 

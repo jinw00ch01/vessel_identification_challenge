@@ -41,6 +41,10 @@ PARAMS = {
 }
 ROUNDS = 400
 KOREAN_WEIGHT = 4.0
+# rankers averaged at inference: all features, and one without the crude pre-score
+VIEWS = ["none", "k_pre+k_pre_rank"]
+# train rows never have bad tonnage on Hangul records, evaluation records do
+AUG_COPIES = 2
 
 
 def load():
@@ -130,10 +134,50 @@ def fold_splits(train, split_seed):
         yield np.flatnonzero(f != k), np.flatnonzero(f == k)
 
 
+def perturb(df, rng, mode):
+    """Hangul rows with unreliable tonnage, as the evaluation records may have it."""
+    df = df.copy()
+    n = len(df)
+    gt = df["gross_tonnage"].to_numpy(float)
+    igt = df["international_gross_tonnage"].to_numpy(float)
+    if mode == "miss":
+        f1 = f2 = np.full(n, np.nan)
+    elif mode == "u15":
+        f1 = f2 = rng.uniform(0.85, 1.15, n)
+    elif mode == "heavy":
+        f1 = f2 = np.exp(rng.choice([-1.0, 1.0], n) * rng.uniform(0.1, 0.6, n))
+    elif mode == "aug":
+        # training mixture: a quarter blank, the rest off by up to x/÷1.8, fields usually off together
+        f1 = np.exp(rng.choice([-1.0, 1.0], n) * rng.uniform(0.03, 0.6, n))
+        other = np.exp(rng.choice([-1.0, 1.0], n) * rng.uniform(0.03, 0.6, n))
+        f2 = np.where(rng.random(n) < 0.7, f1, other)
+        blank = rng.random(n) < 0.25
+        f1, f2 = np.where(blank, np.nan, f1), np.where(blank, np.nan, f2)
+    else:
+        raise ValueError(mode)
+    df["gross_tonnage"] = np.round(gt * f1)
+    df["international_gross_tonnage"] = np.round(igt * f2)
+    return df
+
+
+def augment(df, rng, copies):
+    """Extra training queries: copies of the Hangul rows with perturbed tonnage."""
+    kor = df[df["vessel_name"].map(vlib.is_hangul)]
+    if not copies or kor.empty:
+        return kor.iloc[:0]
+    parts = [perturb(kor, rng, "aug").assign(sample_id=lambda d, c=c: d["sample_id"] + f"_aug{c}")
+             for c in range(copies)]
+    return pd.concat(parts, ignore_index=True)
+
+
 def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split_seed):
     params = dict(PARAMS, objective=args.objective)
+    rng = np.random.default_rng(1000 + split_seed)
     oof = np.empty(len(train), dtype=object)
+    margin = np.full(len(train), np.nan)
     recall = np.zeros(len(train), dtype=bool)
+    stress = {mode: [] for mode in args.stress}
+    sel = lambda idx, seq: [seq[i] for i in idx]  # noqa: E731
     for fold, (tr_idx, va_idx) in enumerate(fold_splits(train, split_seed)):
         t0 = time.time()
         index.tables = vlib.fit_tables(train.iloc[tr_idx], catalog)
@@ -142,28 +186,74 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
         for k, i in enumerate(kor_idx):
             fc[i], ff[i] = k_cands[k], k_feats[k]
         ff = refresh_tables(index, rows, fc, ff)
-        sel = lambda idx, seq: [seq[i] for i in idx]  # noqa: E731
-        Xtr, ytr, gtr, wtr = stack(index, sel(tr_idx, rows), sel(tr_idx, fc), sel(tr_idx, ff),
-                                   korean_weight=args.kw)
-        model = train_model(Xtr, ytr, gtr, wtr, rounds=args.rounds, params=params)
-        Xva, _, _, _ = stack(index, sel(va_idx, rows), sel(va_idx, fc), sel(va_idx, ff), with_labels=False)
-        pred = argmax_ids(index, sel(va_idx, fc), model.predict(Xva))
+        tr_rows, tr_c, tr_f = sel(tr_idx, rows), sel(tr_idx, fc), sel(tr_idx, ff)
+        aug = augment(train.iloc[tr_idx], rng, args.aug).to_dict("records")
+        if aug:
+            a_c, a_f = vlib.build_matrix(index, aug)
+            tr_rows, tr_c, tr_f = tr_rows + aug, tr_c + a_c, tr_f + a_f
+        Xtr, ytr, gtr, wtr = stack(index, tr_rows, tr_c, tr_f, korean_weight=args.kw)
+        models = [(train_model(blank(Xtr, d), ytr, gtr, wtr, rounds=args.rounds, params=params), d)
+                  for d in parse_views(args)]
+
+        def score(feats_):
+            X = np.vstack(feats_)
+            return sum(m.predict(blank(X, d)) for m, d in models)
+
+        scores = score(sel(va_idx, ff))
+        pred = argmax_ids(index, sel(va_idx, fc), scores)
         oof[va_idx] = pred
+        offset = 0
         for i in va_idx:
-            recall[i] = index.id_to_index[rows[i]["target_vessel_id"]] in set(fc[i])
+            local = scores[offset: offset + len(fc[i])]
+            offset += len(fc[i])
+            hit = fc[i] == index.id_to_index[rows[i]["target_vessel_id"]]
+            recall[i] = hit.any()
+            # target score minus the best other candidate (negative = wrong)
+            if hit.any() and (~hit).any():
+                margin[i] = local[hit].max() - local[~hit].max()
+        va_kor = [i for i in va_idx if kor[i]]
+        for mode in args.stress:
+            st = perturb(train.iloc[va_kor], rng, mode).to_dict("records")
+            s_c, s_f = vlib.build_matrix(index, st)
+            s_pred = argmax_ids(index, s_c, score(s_f))
+            stress[mode] += [p == r["target_vessel_id"] for p, r in zip(s_pred, st)]
         if args.verbose:
             m = vlib.weighted_accuracy(train["vessel_name"].iloc[va_idx], train["target_vessel_id"].iloc[va_idx], pred)
             print(f"fold {fold}: {m} ({time.time() - t0:.0f}s)", flush=True)
     m = vlib.weighted_accuracy(train["vessel_name"], train["target_vessel_id"], oof)
+    m.update({f"k_{mode}": float(np.mean(v)) for mode, v in stress.items()})
     print(f"split {split_seed}: recall k={recall[kor].mean():.4f} e={recall[~kor].mean():.4f} CV {m}", flush=True)
     WORK.mkdir(exist_ok=True)
     out = train.copy()
     out["pred"] = oof
+    out["margin"] = margin
     out.to_csv(WORK / f"oof_{split_seed}.csv", index=False)
     if args.verbose:
+        model = models[0][0]
         imp = pd.Series(model.feature_importance("gain"), index=vlib.FEATURES).sort_values(ascending=False)
         print(imp.head(30).round(0).to_string())
     return m
+
+
+def parse_views(args) -> list[list[str]]:
+    """One ranker per view; a view lists the features it leaves out ('none' = all)."""
+    views = []
+    for v in args.views:
+        drop = [] if v == "none" else v.split("+")
+        unknown = [f for f in drop + args.drop if f not in vlib.COL]
+        if unknown:
+            raise SystemExit(f"unknown features: {unknown}")
+        views.append(drop + args.drop)
+    return views
+
+
+def blank(X, drop):
+    """Copy of X with the dropped feature columns set to missing."""
+    if not drop:
+        return X
+    X = X.copy()
+    X[:, [vlib.COL[f] for f in drop]] = np.nan
+    return X
 
 
 def run_final(args):
@@ -171,13 +261,21 @@ def run_final(args):
     tables = vlib.fit_tables(train, catalog)
     index = vlib.CatalogIndex(catalog, tables)
     rows = train.to_dict("records")
+    rows += augment(train, np.random.default_rng(1000), args.aug).to_dict("records")
     cands, feats = vlib.build_matrix(index, rows)
     X, y, g, w = stack(index, rows, cands, feats)
-    model = train_model(X, y, g, w)
-    model.save_model(str(MODEL_DIR / "ranker.txt"))
+    for old in MODEL_DIR.glob("ranker*.txt"):
+        old.unlink()
+    views = []
+    for k, drop in enumerate(parse_views(args)):
+        model = train_model(blank(X, drop), y, g, w, rounds=args.rounds, params=dict(PARAMS, objective=args.objective))
+        model.save_model(str(MODEL_DIR / f"ranker_{k}.txt"))
+        views.append({"file": f"ranker_{k}.txt", "drop": drop})
+    with open(MODEL_DIR / "views.json", "w", encoding="utf-8") as fh:
+        json.dump(views, fh, indent=1)
     with open(MODEL_DIR / "tables.json", "w", encoding="utf-8") as fh:
         json.dump(tables, fh, ensure_ascii=False)
-    print("saved model and tables")
+    print(f"saved {len(views)} ranker(s) and tables")
 
 
 if __name__ == "__main__":
@@ -189,7 +287,15 @@ if __name__ == "__main__":
     ap.add_argument("--rounds", type=int, default=ROUNDS)
     ap.add_argument("--objective", default=PARAMS["objective"])
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--drop", nargs="*", default=[], help="features every view leaves out")
+    ap.add_argument("--aug", type=int, default=AUG_COPIES, help="perturbed-tonnage copies per Hangul train row")
+    ap.add_argument("--stress", nargs="*", default=["miss", "u15", "heavy"],
+                    help="CV also scores Hangul validation rows with tonnage perturbed this way")
+    ap.add_argument("--threads", type=int, default=PARAMS["num_threads"])
+    ap.add_argument("--views", nargs="+", default=VIEWS,
+                    help="rankers to average; each is 'none' or features to leave out joined by '+'")
     a = ap.parse_args()
+    PARAMS["num_threads"] = a.threads
     if a.cv:
         run_cv(a)
     if a.final:

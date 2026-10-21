@@ -9,6 +9,7 @@ alone, in a subset, or in any order.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from functools import lru_cache
 import math
 import re
 import unicodedata
@@ -96,7 +97,7 @@ def collapse(s: str) -> str:
 VOWELS = set("AEIOU")
 
 
-def _rules(th: str, ch: str, pinyin: bool = False):
+def _rules(th: str, ch: str, pinyin: bool = False, keep_r: bool = False):
     soft = [] if pinyin else [
         (re.compile(r"C(?=[EIY])"), "S"),
         (re.compile(r"G(?=[EIY])"), "S"),
@@ -113,19 +114,42 @@ def _rules(th: str, ch: str, pinyin: bool = False):
         (re.compile(r"T?CH$"), "CHI"),
         (re.compile(r"SH$"), "SHI"),
     ]
-    return [
+    if pinyin:
+        # Korean spelling of pinyin finals (장인, 톈진, 선전, 위안, 중)
+        vowels = [
+            (re.compile(r"YUE"), "UE"),
+            (re.compile(r"YU|(?<=[JQX])U(?!E)"), "UI"),
+            (re.compile(r"ONG"), "UNG"),
+            (re.compile(r"(?<![IUY])E(?!I)"), "O"),
+            (re.compile(r"[IY]AN(?!G)"), "IEN"),
+            (re.compile(r"(?<=[JQ])I(?=[AEOU])"), ""),
+            (re.compile(r"NG"), "N"),
+        ]
+    else:
         # vowel spellings that depend on the letters around them
-        (re.compile(r"(?<=[^AEIOU])U(?=[^AEIOUY]{2}|[^AEIOUY]$)"), "O"),
-        (re.compile(r"IGH"), "AI"),
-        (re.compile(r"^([^AEIOU]*)A([^AEIOU])E$"), r"\1EI\2E"),
-        (re.compile(r"^([^AEIOU]*)I([^AEIOU])E$"), r"\1AI\2E"),
-        (re.compile(r"^([^AEIOU]+)Y$"), r"\1AI"),
-        (re.compile(r"AY"), "EI"),
-        (re.compile(r"EER(?![AEIOUY])"), "IO"),
-        (re.compile(r"ER(?![AEIOUY])"), "O"),
-        (re.compile(r"EE"), "I"),
-        (re.compile(r"OO"), "U"),
-    ] + final_i + pin + [
+        vowels = [
+            (re.compile(r"(?<=[^AEIOU])U(?=[^AEIOUY]{2}|[^AEIOUY]$)"), "O"),
+            (re.compile(r"IGH"), "AI"),
+            (re.compile(r"^([^AEIOU]*)A([^AEIOU])E$"), r"\1EI\2E"),
+            (re.compile(r"^([^AEIOU]*)I([^AEIOU])E$"), r"\1AI\2E"),
+            (re.compile(r"^([^AEIOU]+)Y$"), r"\1AI"),
+            (re.compile(r"AY"), "EI"),
+        ] + ([] if keep_r else [
+            (re.compile(r"EER(?![AEIOUY])"), "IO"),
+            (re.compile(r"ER(?![AEIOUY])"), "O"),
+        ]) + [
+            (re.compile(r"EE"), "I"),
+            (re.compile(r"OO"), "U"),
+        ] + ([] if ch == "K" else [
+            # sea -> 씨, eagle -> 이글, journey -> 저니
+            (re.compile(r"EA"), "I"),
+            (re.compile(r"EY$"), "I"),
+        ])
+        if keep_r:
+            # continental spelling: R is sounded (아르페지오, 마르코) and GGI is soft
+            vowels.insert(0, (re.compile(r"GG(?=[EIY])"), "J"))
+    drop_r = [] if keep_r else [(re.compile(r"(?<=[AEIOU])R(?![AEIOUY])"), "")]
+    return vowels + final_i + pin + [
         (re.compile(r"PH"), "F"),
         (re.compile(r"^GH"), "K"),
         (re.compile(r"GH(?=T|$)"), ""),
@@ -147,7 +171,7 @@ def _rules(th: str, ch: str, pinyin: bool = False):
         (re.compile(r"[JZ]"), "S"),
         (re.compile(r"[VFB]"), "P"),
         (re.compile(r"D"), "T"),
-        (re.compile(r"(?<=[AEIOU])R(?![AEIOUY])"), ""),
+    ] + drop_r + [
         (re.compile(r"R"), "L"),
         (re.compile(r"W"), "U"),
         (re.compile(r"Y"), "I"),
@@ -155,10 +179,11 @@ def _rules(th: str, ch: str, pinyin: bool = False):
     ]
 
 
-_ENG_RULES = (_rules("T", "S"), _rules("S", "K"), _rules("T", "S", pinyin=True))
+_ENG_RULES = (_rules("T", "S"), _rules("S", "K"), _rules("T", "S", pinyin=True), _rules("T", "S", keep_r=True))
 N_ALT = len(_ENG_RULES)
 
 
+@lru_cache(maxsize=None)
 def english_word_key(word: str, alt: int = 0) -> str:
     final_e = len(word) >= 3 and word.endswith("E") and word[-2] not in VOWELS
     for pattern, repl in _ENG_RULES[alt]:
@@ -181,6 +206,11 @@ def consonants(key: str) -> str:
 def consonants_raw(key: str) -> str:
     """Consonant skeleton that keeps repeats separated by a vowel (L-E-L stays LL)."""
     return "".join(ch for ch in key if ch not in VOWELS)
+
+
+def vowel_skeleton(key: str) -> str:
+    """Key with every vowel run reduced to one placeholder (얼라이언스 ~ ALLIANCE)."""
+    return re.sub("[AEIOU]+", "A", key)
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +253,10 @@ def _syllables(text: str):
             yield cho, jung, jong
 
 
-def hangul_key(text: str) -> str:
-    return collapse("".join(CHO_CLS[c] + JUNG_CLS[v] + JONG_CLS[j] for c, v, j in _syllables(text)))
+def hangul_key(text: str, eo: str = "O") -> str:
+    """Coarse key; eo='A' reads ㅓ as an unstressed English vowel (얼라이언스 -> ALLIANCE)."""
+    return collapse("".join(CHO_CLS[c] + (eo if v == 4 else JUNG_CLS[v]) + JONG_CLS[j]
+                            for c, v, j in _syllables(text)))
 
 
 def romanize(text: str) -> str:
@@ -321,6 +353,12 @@ def korean_variants(name: str, tables: dict | None = None, exclude: str | None =
         variants.append(collapse("".join(parts)))
     # mixed: best of acronym reading for letter-name tokens, plain for the rest
     variants.append(collapse("".join(r[-1] if spell_acronym(w) else r[0] for w, r in zip(words, readings))))
+    # schwa: ㅓ written for an unstressed English vowel
+    schwa = [hangul_key(w, eo="A") if HANGUL_RE.search(w) else r[0] for w, r in zip(words, readings)]
+    variants.append(collapse("".join(schwa)))
+    for s, r in zip(schwa, readings):
+        if s not in r:
+            r.append(s)
     dict_parts = []
     if tables is not None:
         mapped = []
@@ -336,6 +374,7 @@ def korean_variants(name: str, tables: dict | None = None, exclude: str | None =
         "words": words,
         "readings": readings,
         "dict_parts": dict_parts,
+        "acros": [a for a in (spell_acronym(w) for w in words) if a],
     }
 
 
@@ -436,15 +475,15 @@ FEATURES = [
     "k_sim", "k_csim", "k_partial", "k_dist", "k_len_ratio", "k_sim_rank", "k_sim_gap",
     "k_csim_rank", "k_pre_rank", "k_pre", "k_tok_mean", "k_tok_min", "k_tok_cover",
     "k_dict_cov", "k_dict_hit", "k_dict_miss", "k_n_words", "k_rsim", "k_rsim_rank", "k_tok_first",
+    "k_vsim", "k_vsim_rank", "k_acro_n", "k_acro_hit",
+    "e_idf_share", "e_idf_max", "e_last_tok",
 ]
 COL = {f: i for i, f in enumerate(FEATURES)}
 
 
 def _rank_desc(values: np.ndarray) -> np.ndarray:
-    order = np.argsort(-values, kind="stable")
-    ranks = np.empty(len(values), dtype=np.float32)
-    ranks[order] = np.arange(len(values))
-    return ranks
+    """0 for the largest value; tied values share the best rank."""
+    return np.searchsorted(np.sort(-values), -values, side="left").astype(np.float32)
 
 
 def _rank_asc(values: np.ndarray) -> np.ndarray:
@@ -470,17 +509,24 @@ class CatalogIndex:
         self.base = [strip_prefix(u) for u in self.up]
         self.an = [alnum(b) for b in self.base]
         self.ltoks = [letter_tokens(b) for b in self.base]
-        self.keys = [[english_key(b, alt) for b in self.base] for alt in range(N_ALT)]
+        # word keys per spelling variant; a name's key joins its word keys (same as english_key)
+        word_keys = [[[english_word_key(t, alt) for t in toks] for alt in range(N_ALT)] for toks in self.ltoks]
+        self.keys = [[collapse("".join(wk[alt])) for wk in word_keys] for alt in range(N_ALT)]
         self.key = self.keys[0]
         self.cks = [[consonants(k) for k in keys] for keys in self.keys]
         self.rks = [[consonants_raw(k) for k in keys] for keys in self.keys]
-        self.tok_keys = [
-            list(dict.fromkeys(english_word_key(t, alt) for alt in range(N_ALT) for t in toks))
-            for toks in self.ltoks
+        self.vks = [[vowel_skeleton(k) for k in keys] for keys in self.keys]
+        # per word, its distinct keys over all spelling variants; plus keys of adjacent word pairs
+        self.tok_groups = [
+            [list(dict.fromkeys(wk[alt][j] for alt in range(N_ALT))) for j in range(len(wk[0]))]
+            for wk in word_keys
         ]
-        self.tok_first = [
-            [english_word_key(t)[:1] for t in toks] for toks in self.ltoks
-        ]
+        self.tok_pool = []
+        for wk in word_keys:
+            flat = [k for row in wk for k in row]
+            pairs = [row[a] + row[a + 1] for row in wk for a in range(len(row) - 1)]
+            self.tok_pool.append(list(dict.fromkeys(flat + pairs)))
+        self.tok_first = [[k[:1] for k in wk[0]] for wk in word_keys]
         self.tok_sets = [set(toks) for toks in self.ltoks]
         self.nums = [numbers_of(b) for b in self.base]
         self.ntok = np.array([len(t) for t in self.ltoks], dtype=np.float32)
@@ -493,6 +539,7 @@ class CatalogIndex:
         self.type_prior = np.array([math.log(type_counts[t] / n) for t in self.type], dtype=np.float32)
         self.flag_prior = np.array([math.log(flag_counts[f] / n) for f in self.flag], dtype=np.float32)
         self.tables = tables
+        self._name_cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
         valid = np.flatnonzero(np.isfinite(self.gt))
         order = np.argsort(self.gt[valid], kind="stable")
         self.gt_sorted_idx = valid[order]
@@ -500,9 +547,22 @@ class CatalogIndex:
         postings: dict[str, list[int]] = defaultdict(list)
         for i, toks in enumerate(self.ltoks):
             for t in set(toks):
-                if len(t) >= 3:
-                    postings[t].append(i)
-        self.postings = {t: np.array(v) for t, v in postings.items()}
+                postings[t].append(i)
+        self.tok_df = {t: len(v) for t, v in postings.items()}
+        self.postings = {t: np.array(v) for t, v in postings.items() if len(t) >= 3}
+        self.short_postings = {t: np.array(v) for t, v in postings.items() if len(t) == 2}
+
+    def idf(self, token: str) -> float:
+        return math.log((len(self.ids) + 1) / (self.tok_df.get(token, 0) + 1))
+
+    def acronym_hits(self, acros: list[str], cand: np.ndarray) -> np.ndarray:
+        """How many spelled-out acronyms appear as a word of each candidate's name."""
+        hits = np.zeros(len(cand), dtype=np.float32)
+        for a in acros:
+            post = (self.postings if len(a) >= 3 else self.short_postings).get(a)
+            if post is not None:
+                hits += np.isin(cand, post)
+        return hits
 
     # -- compatibility log-probabilities ------------------------------------
     def cond_lp(self, prefix: str, query_value: str, cand_values: np.ndarray) -> np.ndarray:
@@ -561,12 +621,12 @@ class CatalogIndex:
             cand = np.concatenate([cand, exact[:15]])
         return np.unique(cand)
 
-    def korean_candidates(self, kv: dict, gt: float, igt: float, limit: int = 80):
-        pool = self._gt_window([gt, igt], 0.12)
-        best = np.zeros(len(pool), dtype=np.float32)
+    def _korean_pre(self, kv: dict, cand: np.ndarray, gt: float, igt: float) -> np.ndarray:
+        """Coarse retrieval score: phonetic similarity, number/acronym agreement, tonnage gap."""
+        best = np.zeros(len(cand), dtype=np.float32)
         for keys, cks in zip(self.keys, self.cks):
-            pk = [keys[i] for i in pool]
-            pc = [cks[i] for i in pool]
+            pk = [keys[i] for i in cand]
+            pc = [cks[i] for i in cand]
             for key in kv["keys"]:
                 s1 = process.cdist([key], pk, scorer=Levenshtein.normalized_similarity, dtype=np.float32)[0]
                 s2 = process.cdist([consonants(key)], pc, scorer=Levenshtein.normalized_similarity,
@@ -574,11 +634,48 @@ class CatalogIndex:
                 best = np.maximum(best, s1 + s2)
         qn = kv["numbers"]
         bonus = np.array([0.15 if (qn and self.nums[i] == qn) else (-0.15 if qn and self.nums[i] and self.nums[i] != qn else 0.0)
-                          for i in pool], dtype=np.float32)
-        rg = self._min_rg(pool, gt, igt)
-        pre = best + bonus - 0.5 * np.nan_to_num(rg, nan=0.5)
-        order = np.argsort(-pre, kind="stable")[:limit]
-        return pool[order], pre[order]
+                          for i in cand], dtype=np.float32)
+        bonus += 0.3 * self.acronym_hits(kv["acros"], cand)
+        rg = self._min_rg(cand, gt, igt)
+        return best + bonus - 0.5 * np.nan_to_num(rg, nan=0.5)
+
+    def name_candidates(self, kv: dict, gt: float, igt: float, limit: int = 40, wide: int = 120) -> np.ndarray:
+        """Best phonetic matches in the whole catalog, whatever the recorded tonnage says."""
+        key = tuple(kv["keys"])
+        if not key:  # e.g. "제1호": nothing to spell
+            return np.zeros(0, dtype=np.int64)
+        hit = self._name_cache.get(key)
+        if hit is None:
+            best = np.zeros(len(self.ids), dtype=np.float32)
+            for keys in self.keys:
+                sim = process.cdist(kv["keys"], keys, scorer=Levenshtein.normalized_similarity,
+                                    dtype=np.float32, workers=-1)
+                best = np.maximum(best, sim.max(axis=0))
+            top = np.argpartition(-best, wide)[:wide]
+            hit = (top, best[top])
+            self._name_cache[key] = hit
+        top, score = hit
+        # equal names are common (동명 선박): among ties prefer the nearer tonnage
+        rg = self._min_rg(top, gt, igt)
+        adj = score - 0.01 * np.minimum(np.nan_to_num(rg, nan=3.0), 3.0)
+        return top[np.argsort(-adj, kind="stable")[:limit]]
+
+    def korean_candidates(self, kv: dict, gt: float, igt: float, limit: int = 80):
+        names = self.name_candidates(kv, gt, igt)
+        if math.isfinite(gt) or math.isfinite(igt):
+            pool = self._gt_window([gt, igt], 0.12)
+            pre = self._korean_pre(kv, pool, gt, igt)
+            order = np.argsort(-pre, kind="stable")[:limit]
+            cand, pre = pool[order], pre[order]
+            extra = np.setdiff1d(names, cand)
+        else:
+            cand, pre, extra = names[:0], np.zeros(0, dtype=np.float32), names
+        if len(extra):
+            cand = np.concatenate([cand, extra])
+            pre = np.concatenate([pre, self._korean_pre(kv, extra, gt, igt)])
+            order = np.argsort(-pre, kind="stable")
+            cand, pre = cand[order], pre[order]
+        return cand, pre
 
     # -- features -------------------------------------------------------------
     def query_candidates(self, row: dict):
@@ -656,6 +753,22 @@ class CatalogIndex:
         F[:, COL["e_n_best"]] = float((osa == osa.min()).sum())
         F[:, COL["e_key_sim"]] = process.cdist([english_key(base)], [self.key[i] for i in cand],
                                                scorer=Levenshtein.normalized_similarity, dtype=np.float32)[0]
+        # renamed vessels keep a distinctive word, so weight shared words by rarity
+        qtoks = letter_tokens(base)
+        idf = {t: self.idf(t) for t in set(qtoks)}
+        total = sum(idf.values())
+        share = np.zeros(len(cand), dtype=np.float32)
+        best = np.zeros(len(cand), dtype=np.float32)
+        last = np.zeros(len(cand), dtype=np.float32)
+        for j, i in enumerate(cand):
+            shared = [idf[t] for t in idf if t in self.tok_sets[i]]
+            if shared:
+                share[j] = sum(shared) / total
+                best[j] = max(shared)
+            last[j] = float(bool(qtoks) and bool(self.ltoks[i]) and qtoks[-1] == self.ltoks[i][-1])
+        F[:, COL["e_idf_share"]] = share
+        F[:, COL["e_idf_max"]] = best
+        F[:, COL["e_last_tok"]] = last
 
     def _korean_features(self, F, cand, info):
         kv = info["kv"]
@@ -666,16 +779,20 @@ class CatalogIndex:
         dist = np.full(m, 99, dtype=np.float32)
         lenr = np.zeros(m, dtype=np.float32)
         rsim = np.zeros(m, dtype=np.float32)
-        for keys, cks, rks in zip(self.keys, self.cks, self.rks):
+        vsim = np.zeros(m, dtype=np.float32)
+        for keys, cks, rks, vks in zip(self.keys, self.cks, self.rks, self.vks):
             ck = [keys[i] for i in cand]
             cc = [cks[i] for i in cand]
             cr = [rks[i] for i in cand]
+            cv = [vks[i] for i in cand]
             klen = np.array([max(len(k), 1) for k in ck], dtype=np.float32)
             for key in kv["keys"]:
                 s = process.cdist([key], ck, scorer=Levenshtein.normalized_similarity, dtype=np.float32)[0]
                 c = process.cdist([consonants(key)], cc, scorer=Levenshtein.normalized_similarity, dtype=np.float32)[0]
                 r = process.cdist([consonants_raw(key)], cr, scorer=Levenshtein.normalized_similarity, dtype=np.float32)[0]
+                v = process.cdist([vowel_skeleton(key)], cv, scorer=Levenshtein.normalized_similarity, dtype=np.float32)[0]
                 rsim = np.maximum(rsim, r)
+                vsim = np.maximum(vsim, v)
                 p = process.cdist([key], ck, scorer=fuzz.partial_ratio, dtype=np.float32)[0] / 100
                 d = process.cdist([key], ck, scorer=Levenshtein.distance, dtype=np.float32)[0]
                 lenr = np.where(s > sim, len(key) / klen, lenr)
@@ -687,13 +804,17 @@ class CatalogIndex:
         F[:, COL["k_csim"]] = csim
         F[:, COL["k_rsim"]] = rsim
         F[:, COL["k_rsim_rank"]] = _rank_desc(rsim)
+        F[:, COL["k_vsim"]] = vsim
+        F[:, COL["k_vsim_rank"]] = _rank_desc(vsim)
+        F[:, COL["k_acro_n"]] = len(kv["acros"])
+        F[:, COL["k_acro_hit"]] = self.acronym_hits(kv["acros"], cand)
         F[:, COL["k_partial"]] = part
         F[:, COL["k_dist"]] = dist
         F[:, COL["k_len_ratio"]] = lenr
         F[:, COL["k_sim_rank"]] = _rank_desc(sim)
         F[:, COL["k_sim_gap"]] = sim.max() - sim
         F[:, COL["k_csim_rank"]] = _rank_desc(csim)
-        F[:, COL["k_pre_rank"]] = np.arange(m, dtype=np.float32)
+        F[:, COL["k_pre_rank"]] = _rank_desc(np.asarray(info["pre"], dtype=np.float32))
         F[:, COL["k_pre"]] = info["pre"]
         # token-level agreement: each Hangul word against the candidate's words
         words, readings, dparts = kv["words"], kv["readings"], kv["dict_parts"]
@@ -709,9 +830,7 @@ class CatalogIndex:
         dhit = np.zeros(m, dtype=np.float32)
         dmiss = np.zeros(m, dtype=np.float32)
         for j, i in enumerate(cand):
-            tkeys = self.tok_keys[i]
-            pair_keys = [a + b for a, b in zip(tkeys, tkeys[1:])]
-            pool = tkeys + pair_keys
+            pool = self.tok_pool[i]
             if n_words and pool:
                 scores = []
                 used = set()
@@ -726,7 +845,9 @@ class CatalogIndex:
                     used.add(best_k)
                 tok_mean[j] = float(np.mean(scores))
                 tok_min[j] = float(np.min(scores))
-                tok_cover[j] = sum(1 for k in tkeys if k in used or any(k in u for u in used)) / max(len(tkeys), 1)
+                groups = self.tok_groups[i]
+                covered = sum(1 for g in groups if any(k in u for k in g for u in used))
+                tok_cover[j] = covered / max(len(groups), 1)
                 c_first = [("V" if f in VOWELS else f) for f in self.tok_first[i] if f]
                 if q_first and c_first:
                     tok_first[j] = sum(1 for a, b in zip(q_first, c_first) if a == b) / max(len(q_first), len(c_first))

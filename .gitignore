@@ -15,5 +15,5 @@ venv/
 
 # Trained artifacts are rebuilt by tools/train.py --final.
 # tables.json holds lookups derived from train.csv, so it must stay out of the public repo.
-submit/model/ranker.txt
+submit/model/ranker*.txt
 submit/model/tables.json

@@ -37,9 +37,9 @@ def build_zip(name: str) -> Path:
     return path
 
 
-def smoke(zip_path: Path, n_rows: int = 3000) -> None:
+def run_box(zip_path: Path, sample: pd.DataFrame, label: str) -> None:
     """Unzip into a fresh dir with data/ and output/, run script.py, score it."""
-    box = WORK / "smoke"
+    box = WORK / "smoke" / label
     if box.exists():
         shutil.rmtree(box)
     box.mkdir(parents=True)
@@ -47,22 +47,29 @@ def smoke(zip_path: Path, n_rows: int = 3000) -> None:
         zf.extractall(box)
     (box / "data").mkdir()
     (box / "output").mkdir()
-    train = pd.read_csv(ROOT / "data" / "train.csv", encoding="utf-8-sig")
-    sample = train.sample(n=min(n_rows, len(train)), random_state=7).reset_index(drop=True)
-    sample = sample.assign(sample_id=[f"TEST_{i:05d}" for i in range(len(sample))])
     sample.drop(columns=["target_vessel_id"]).to_csv(box / "data" / "test.csv", index=False, encoding="utf-8-sig")
     shutil.copy(ROOT / "data" / "vessel_catalog.csv", box / "data" / "vessel_catalog.csv")
     t0 = time.time()
     proc = subprocess.run([sys.executable, "script.py"], cwd=box, capture_output=True, text=True)
     print(proc.stdout[-2000:], proc.stderr[-4000:])
-    print(f"runtime {time.time() - t0:.1f}s for {len(sample)} rows")
+    print(f"[{label}] runtime {time.time() - t0:.1f}s for {len(sample)} rows")
     sub = pd.read_csv(box / "output" / "submission.csv")
     assert list(sub.columns) == ["sample_id", "target_vessel_id"], sub.columns
     assert len(sub) == len(sample) and sub["sample_id"].tolist() == sample["sample_id"].tolist()
     sys.path.insert(0, str(box / "model"))
     import vlib
-    print("in-sample (train rows, call-sign lookup active):",
+    print(f"[{label}] in-sample score:",
           vlib.weighted_accuracy(sample["vessel_name"], sample["target_vessel_id"], sub["target_vessel_id"]))
+
+
+def smoke(zip_path: Path, n_rows: int = 3000) -> None:
+    train = pd.read_csv(ROOT / "data" / "train.csv", encoding="utf-8-sig")
+    sample = train.sample(n=min(n_rows, len(train)), random_state=7).reset_index(drop=True)
+    sample = sample.assign(sample_id=[f"TEST_{i:05d}" for i in range(len(sample))])
+    # train rows: every call sign is known, so the lookup answers them
+    run_box(zip_path, sample, "lookup")
+    # unseen call signs force every row through retrieval and the ranker
+    run_box(zip_path, sample.assign(call_sign="CS_UNSEEN"), "ranker")
 
 
 if __name__ == "__main__":
