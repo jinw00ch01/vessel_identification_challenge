@@ -191,12 +191,25 @@ def perturb(df, rng, mode):
 # jamo swaps that Hangul spellings of one foreign name commonly differ by
 _JUNG_SWAP = {1: 5, 5: 1, 4: 8, 8: 4, 6: 12, 12: 6}            # ㅐ/ㅔ, ㅓ/ㅗ, ㅕ/ㅛ
 _CHO_SWAP = {0: 15, 15: 0, 3: 16, 16: 3, 7: 17, 17: 7, 9: 10, 10: 9, 12: 14, 14: 12}  # ㄱ/ㅋ ㄷ/ㅌ ㅂ/ㅍ ㅅ/ㅆ ㅈ/ㅊ
-NAME_MODES = ("spell", "spell3", "dropsyl", "nospace", "dropword", "dropfirst", "droplast", "initial", "trunc")
+NAME_MODES = ("spell", "spell3", "dropsyl", "nospace", "dropword", "dropfirst", "droplast", "initial", "trunc",
+              "randname")
 
 
 def perturb_name(df, rng, mode):
     """Hangul names written differently: one jamo swapped, spaces removed, or a word left out."""
     df = df.copy()
+    if mode == "randname":
+        # record carries another vessel's name (renamed vessel whose old name now belongs to someone else)
+        names = df["vessel_name"].to_numpy()
+        vids = df["target_vessel_id"].to_numpy()
+        perm = rng.permutation(len(df))
+        for _ in range(10):  # never the vessel's own name: take the next row's pick instead
+            same = np.flatnonzero(vids[perm] == vids)
+            if not len(same):
+                break
+            perm[same] = perm[(same + 1) % len(df)]
+        df["vessel_name"] = names[perm]
+        return df
     out = []
     for name in df["vessel_name"]:
         if mode == "nospace":
@@ -252,6 +265,16 @@ def augment(df, rng, copies, mode="aug", name_copies=0):
     for c in range(name_copies):
         if NAME_AUG == "dropfirst":
             part = perturb_name(multi, rng, "dropfirst")
+        elif NAME_AUG == "mix2":
+            # wider mixture: multi-word names lose their first, last or a random word, a syllable,
+            # or get three jamo swaps; single-word names lose a syllable or get the jamo swaps
+            u = rng.random(len(kor))
+            is_multi = kor.index.isin(multi.index)
+            groups = [(is_multi & (u < 0.3), "dropfirst"), (is_multi & (u >= 0.3) & (u < 0.5), "droplast"),
+                      (is_multi & (u >= 0.5) & (u < 0.6), "dropword"),
+                      ((is_multi & (u >= 0.6) & (u < 0.8)) | (~is_multi & (u < 0.5)), "dropsyl"),
+                      ((is_multi & (u >= 0.8)) | (~is_multi & (u >= 0.5)), "spell3")]
+            part = pd.concat([perturb_name(kor[g], rng, m) for g, m in groups if g.any()])
         else:
             # mix: multi-word names lose their first (1/2) or a random word (1/4) or get a jamo swap (1/4);
             # single-word names get a jamo swap
@@ -474,7 +497,7 @@ if __name__ == "__main__":
     ap.add_argument("--whole-name", default=vlib.WHOLE_NAME_SEARCH, choices=["always", "no_tonnage"])
     ap.add_argument("--exact", action=argparse.BooleanOptionalAction, default=vlib.EXACT_TONNAGE,
                     help="add Hangul candidates with exactly the recorded tonnage")
-    ap.add_argument("--name-aug", default=NAME_AUG, choices=["dropfirst", "mix"])
+    ap.add_argument("--name-aug", default=NAME_AUG, choices=["dropfirst", "mix", "mix2"])
     ap.add_argument("--latin-words", action=argparse.BooleanOptionalAction, default=vlib.LATIN_WORDS,
                     help="Latin word-level retrieval")
     ap.add_argument("--latin-prefix", action=argparse.BooleanOptionalAction, default=vlib.LATIN_PREFIX,
