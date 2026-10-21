@@ -54,6 +54,8 @@ NAME_AUG = "mix"
 # share of multi-word Latin rows copied without their first word; only the Latin rankers train on them
 LATIN_NAME_FRAC = 0.3
 LATIN_MODELS = True
+# share of Hangul rows copied with international tonnage blank (gross tonnage alone, often the domestic figure)
+NOIGT_FRAC = 0.0
 
 
 def load():
@@ -155,6 +157,10 @@ def perturb(df, rng, mode):
         f1 = f2 = rng.uniform(0.85, 1.15, n)
     elif mode == "heavy":
         f1 = f2 = np.exp(rng.choice([-1.0, 1.0], n) * rng.uniform(0.1, 0.6, n))
+    elif mode in ("noigt", "nogt"):
+        # one of the two fields left blank; for Korean-flag vessels gross_tonnage is the (smaller) domestic figure
+        f1 = np.full(n, np.nan) if mode == "nogt" else np.ones(n)
+        f2 = np.full(n, np.nan) if mode == "noigt" else np.ones(n)
     elif mode == "aug":
         # training mixture: a quarter blank, the rest off by up to x/÷1.8, fields usually off together
         f1 = np.exp(rng.choice([-1.0, 1.0], n) * rng.uniform(0.03, 0.6, n))
@@ -249,6 +255,9 @@ def augment(df, rng, copies, mode="aug", name_copies=0):
         lat = df[~df["vessel_name"].map(vlib.is_hangul) & (df["vessel_name"].str.split().str.len() >= 2)]
         lat = lat[rng.random(len(lat)) < LATIN_NAME_FRAC]
         parts.append(perturb_name(lat, rng, "dropfirst").assign(sample_id=lambda d: d["sample_id"] + "_lname"))
+    if NOIGT_FRAC:
+        part = kor[kor["international_gross_tonnage"].notna() & (rng.random(len(kor)) < NOIGT_FRAC)]
+        parts.append(part.assign(international_gross_tonnage=np.nan, sample_id=lambda d: d["sample_id"] + "_noigt"))
     return pd.concat(parts, ignore_index=True) if parts else kor.iloc[:0]
 
 
@@ -462,6 +471,10 @@ if __name__ == "__main__":
                     help="share of multi-word Latin rows copied without their first word")
     ap.add_argument("--latin-models", action=argparse.BooleanOptionalAction, default=LATIN_MODELS,
                     help="separate rankers for Latin rows, the only ones trained on the Latin name copies")
+    ap.add_argument("--domestic", action=argparse.BooleanOptionalAction, default=vlib.DOMESTIC_GT,
+                    help="Hangul records with gross tonnage only: search up to ~1.8x above it")
+    ap.add_argument("--aug-noigt", type=float, default=NOIGT_FRAC,
+                    help="share of Hangul rows copied with the international tonnage blank")
     a = ap.parse_args()
     PARAMS["num_threads"] = a.threads
     vlib.WHOLE_NAME_SEARCH = a.whole_name
@@ -470,6 +483,8 @@ if __name__ == "__main__":
     vlib.LATIN_WORDS = a.latin_words
     vlib.LATIN_PREFIX = a.latin_prefix
     LATIN_NAME_FRAC = a.aug_latin_name
+    vlib.DOMESTIC_GT = a.domestic
+    NOIGT_FRAC = a.aug_noigt
     if a.cv:
         run_cv(a)
     if a.final:

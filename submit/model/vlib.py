@@ -531,6 +531,8 @@ EXACT_TONNAGE = True
 LATIN_WORDS = True
 # ... and names with a word that starts with a record word (KENSINGTON cut to KENSIN, PAC for PACIFIC)
 LATIN_PREFIX = True
+# Hangul records with gross tonnage but no international tonnage: search further up (domestic figures are smaller)
+DOMESTIC_GT = True
 
 
 class CatalogIndex:
@@ -626,12 +628,14 @@ class CatalogIndex:
         return out
 
     # -- candidate retrieval ------------------------------------------------
-    def _gt_window(self, values: list[float], tol: float) -> np.ndarray:
+    def _gt_window(self, values: list[float], tol: float, hi_tol: float | None = None) -> np.ndarray:
+        """Catalog vessels whose tonnage puts each recorded value within -tol..+tol of it (hi_tol: how
+        far below the catalog figure a record may be instead)."""
         found = []
         for v in values:
             if math.isfinite(v):
                 lo = np.searchsorted(self.gt_sorted, v / (1 + tol), side="left")
-                hi = np.searchsorted(self.gt_sorted, v / (1 - tol), side="right")
+                hi = np.searchsorted(self.gt_sorted, v / (1 - (tol if hi_tol is None else hi_tol)), side="right")
                 found.append(self.gt_sorted_idx[lo:hi])
         if not found:
             return np.arange(len(self.ids))
@@ -762,7 +766,9 @@ class CatalogIndex:
         if WHOLE_NAME_SEARCH == "always" or not (math.isfinite(gt) or math.isfinite(igt)):
             names = np.union1d(names, self.name_candidates(kv, gt, igt))
         if math.isfinite(gt) or math.isfinite(igt):
-            pool = self._gt_window([gt, igt], 0.12)
+            # gross tonnage alone may be the domestic figure, up to ~45% below the international one in the catalog
+            domestic = DOMESTIC_GT and math.isfinite(gt) and not math.isfinite(igt)
+            pool = self._gt_window([gt, igt], 0.12, hi_tol=0.45 if domestic else None)
             pre = self._korean_pre(kv, pool, gt, igt)
             top = np.argsort(-pre, kind="stable")[:limit]
             if EXACT_TONNAGE:
