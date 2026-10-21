@@ -12,6 +12,7 @@ from collections import defaultdict
 import json
 import math
 from pathlib import Path
+import re
 import sys
 import time
 
@@ -148,6 +149,10 @@ def fold_splits(train, split_seed):
 def perturb(df, rng, mode):
     """Hangul rows with unreliable tonnage, as the evaluation records may have it."""
     df = df.copy()
+    if mode in ("notype", "noflag"):
+        # 일부 정보의 누락: train never lacks a vessel type
+        df["vessel_type" if mode == "notype" else "flag_name"] = None
+        return df
     n = len(df)
     gt = df["gross_tonnage"].to_numpy(float)
     igt = df["international_gross_tonnage"].to_numpy(float)
@@ -186,7 +191,7 @@ def perturb(df, rng, mode):
 # jamo swaps that Hangul spellings of one foreign name commonly differ by
 _JUNG_SWAP = {1: 5, 5: 1, 4: 8, 8: 4, 6: 12, 12: 6}            # ㅐ/ㅔ, ㅓ/ㅗ, ㅕ/ㅛ
 _CHO_SWAP = {0: 15, 15: 0, 3: 16, 16: 3, 7: 17, 17: 7, 9: 10, 10: 9, 12: 14, 14: 12}  # ㄱ/ㅋ ㄷ/ㅌ ㅂ/ㅍ ㅅ/ㅆ ㅈ/ㅊ
-NAME_MODES = ("spell", "nospace", "dropword", "dropfirst", "droplast", "initial", "trunc")
+NAME_MODES = ("spell", "spell3", "dropsyl", "nospace", "dropword", "dropfirst", "droplast", "initial", "trunc")
 
 
 def perturb_name(df, rng, mode):
@@ -210,18 +215,25 @@ def perturb_name(df, rng, mode):
         elif mode == "trunc":
             # fixed-width record fields: the name cut after 60% of its characters
             name = name[:max(3, math.ceil(0.6 * len(name)))].rstrip()
-        elif mode == "spell":
-            spots = [i for i, ch in enumerate(name) if 0 <= ord(ch) - 0xAC00 < 11172
-                     and ((ord(ch) - 0xAC00) // 588 in _CHO_SWAP or (ord(ch) - 0xAC00) % 588 // 28 in _JUNG_SWAP)]
+        elif mode in ("spell", "spell3"):
+            for _ in range(3 if mode == "spell3" else 1):
+                spots = [i for i, ch in enumerate(name) if 0 <= ord(ch) - 0xAC00 < 11172
+                         and ((ord(ch) - 0xAC00) // 588 in _CHO_SWAP or (ord(ch) - 0xAC00) % 588 // 28 in _JUNG_SWAP)]
+                if spots:
+                    i = spots[rng.integers(len(spots))]
+                    cho, rest = divmod(ord(name[i]) - 0xAC00, 588)
+                    jung, jong = divmod(rest, 28)
+                    if jung in _JUNG_SWAP and (cho not in _CHO_SWAP or rng.random() < 0.5):
+                        jung = _JUNG_SWAP[jung]
+                    elif cho in _CHO_SWAP:
+                        cho = _CHO_SWAP[cho]
+                    name = name[:i] + chr(0xAC00 + cho * 588 + jung * 28 + jong) + name[i + 1:]
+        elif mode == "dropsyl":
+            # one syllable of a word of three or more left out (얼라이언스 -> 얼라언스)
+            spots = [i for w in re.finditer(r"[가-힣]{3,}", name) for i in range(w.start(), w.end())]
             if spots:
                 i = spots[rng.integers(len(spots))]
-                cho, rest = divmod(ord(name[i]) - 0xAC00, 588)
-                jung, jong = divmod(rest, 28)
-                if jung in _JUNG_SWAP and (cho not in _CHO_SWAP or rng.random() < 0.5):
-                    jung = _JUNG_SWAP[jung]
-                elif cho in _CHO_SWAP:
-                    cho = _CHO_SWAP[cho]
-                name = name[:i] + chr(0xAC00 + cho * 588 + jung * 28 + jong) + name[i + 1:]
+                name = name[:i] + name[i + 1:]
         else:
             raise ValueError(mode)
         out.append(name)
