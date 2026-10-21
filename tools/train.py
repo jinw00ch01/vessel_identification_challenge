@@ -169,6 +169,43 @@ def perturb(df, rng, mode):
     return df
 
 
+# jamo swaps that Hangul spellings of one foreign name commonly differ by
+_JUNG_SWAP = {1: 5, 5: 1, 4: 8, 8: 4, 6: 12, 12: 6}            # ㅐ/ㅔ, ㅓ/ㅗ, ㅕ/ㅛ
+_CHO_SWAP = {0: 15, 15: 0, 3: 16, 16: 3, 7: 17, 17: 7, 9: 10, 10: 9, 12: 14, 14: 12}  # ㄱ/ㅋ ㄷ/ㅌ ㅂ/ㅍ ㅅ/ㅆ ㅈ/ㅊ
+NAME_MODES = ("spell", "nospace", "dropword")
+
+
+def perturb_name(df, rng, mode):
+    """Hangul names written differently: one jamo swapped, spaces removed, or a word left out."""
+    df = df.copy()
+    out = []
+    for name in df["vessel_name"]:
+        if mode == "nospace":
+            name = name.replace(" ", "")
+        elif mode == "dropword":
+            words = name.split()
+            if len(words) >= 2:
+                del words[rng.integers(len(words))]
+                name = " ".join(words)
+        elif mode == "spell":
+            spots = [i for i, ch in enumerate(name) if 0 <= ord(ch) - 0xAC00 < 11172
+                     and ((ord(ch) - 0xAC00) // 588 in _CHO_SWAP or (ord(ch) - 0xAC00) % 588 // 28 in _JUNG_SWAP)]
+            if spots:
+                i = spots[rng.integers(len(spots))]
+                cho, rest = divmod(ord(name[i]) - 0xAC00, 588)
+                jung, jong = divmod(rest, 28)
+                if jung in _JUNG_SWAP and (cho not in _CHO_SWAP or rng.random() < 0.5):
+                    jung = _JUNG_SWAP[jung]
+                elif cho in _CHO_SWAP:
+                    cho = _CHO_SWAP[cho]
+                name = name[:i] + chr(0xAC00 + cho * 588 + jung * 28 + jong) + name[i + 1:]
+        else:
+            raise ValueError(mode)
+        out.append(name)
+    df["vessel_name"] = out
+    return df
+
+
 def augment(df, rng, copies, mode="aug"):
     """Extra training queries: copies of the Hangul rows with perturbed tonnage."""
     kor = df[df["vessel_name"].map(vlib.is_hangul)]
@@ -224,7 +261,8 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
                 margin[i] = local[hit].max() - local[~hit].max()
         va_kor = [i for i in va_idx if kor[i]]
         for mode in args.stress:
-            st = perturb(train.iloc[va_kor], rng, mode).to_dict("records")
+            pert = perturb_name if mode in NAME_MODES else perturb
+            st = pert(train.iloc[va_kor], rng, mode).to_dict("records")
             s_c, s_f = vlib.build_matrix(index, st)
             s_pred = argmax_ids(index, s_c, score(s_f))
             stress[mode] += [p == r["target_vessel_id"] for p, r in zip(s_pred, st)]
