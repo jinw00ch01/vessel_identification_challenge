@@ -27,7 +27,7 @@ MODEL_DIR = ROOT / "submit" / "model"
 WORK = ROOT / "work"
 
 PARAMS = {
-    "objective": "binary",
+    "objective": "lambdarank",
     "learning_rate": 0.05,
     "num_leaves": 31,
     "min_data_in_leaf": 20,
@@ -63,11 +63,11 @@ def refresh_tables(index, rows, cands, feats):
     return out
 
 
-def stack(index, rows, cands, feats, with_labels=True):
+def stack(index, rows, cands, feats, with_labels=True, korean_weight=KOREAN_WEIGHT):
     X = np.vstack(feats)
     groups = np.array([len(c) for c in cands])
     kor = np.array([vlib.is_hangul(r.get("vessel_name")) for r in rows])
-    w = np.repeat(np.where(kor, KOREAN_WEIGHT, 1.0), groups)
+    w = np.repeat(np.where(kor, korean_weight, 1.0), groups)
     y = None
     if with_labels:
         y = np.concatenate([
@@ -110,10 +110,31 @@ def run_cv(args):
     for k, i in enumerate(eng_idx):
         cands[i], feats[i] = e_cands[k], e_feats[k]
 
-    gkf = GroupKFold(n_splits=5)
+    results = []
+    for split_seed in args.split_seeds:
+        results.append(cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split_seed))
+    if len(results) > 1:
+        df = pd.DataFrame(results)
+        print("mean over split seeds:", df.mean().round(5).to_dict(), "std:", df.std().round(5).to_dict())
+
+
+def fold_splits(train, split_seed):
+    if split_seed < 0:
+        yield from GroupKFold(n_splits=5).split(train, groups=train["target_vessel_id"])
+        return
+    vessels = train["target_vessel_id"].unique()
+    rng = np.random.default_rng(split_seed)
+    fold_of = dict(zip(rng.permutation(vessels), np.arange(len(vessels)) % 5))
+    f = train["target_vessel_id"].map(fold_of).to_numpy()
+    for k in range(5):
+        yield np.flatnonzero(f != k), np.flatnonzero(f == k)
+
+
+def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split_seed):
+    params = dict(PARAMS, objective=args.objective)
     oof = np.empty(len(train), dtype=object)
     recall = np.zeros(len(train), dtype=bool)
-    for fold, (tr_idx, va_idx) in enumerate(gkf.split(train, groups=train["target_vessel_id"])):
+    for fold, (tr_idx, va_idx) in enumerate(fold_splits(train, split_seed)):
         t0 = time.time()
         index.tables = vlib.fit_tables(train.iloc[tr_idx], catalog)
         k_cands, k_feats = vlib.build_matrix(index, [rows[i] for i in kor_idx])
@@ -122,24 +143,27 @@ def run_cv(args):
             fc[i], ff[i] = k_cands[k], k_feats[k]
         ff = refresh_tables(index, rows, fc, ff)
         sel = lambda idx, seq: [seq[i] for i in idx]  # noqa: E731
-        Xtr, ytr, gtr, wtr = stack(index, sel(tr_idx, rows), sel(tr_idx, fc), sel(tr_idx, ff))
-        model = train_model(Xtr, ytr, gtr, wtr)
+        Xtr, ytr, gtr, wtr = stack(index, sel(tr_idx, rows), sel(tr_idx, fc), sel(tr_idx, ff),
+                                   korean_weight=args.kw)
+        model = train_model(Xtr, ytr, gtr, wtr, rounds=args.rounds, params=params)
         Xva, _, _, _ = stack(index, sel(va_idx, rows), sel(va_idx, fc), sel(va_idx, ff), with_labels=False)
         pred = argmax_ids(index, sel(va_idx, fc), model.predict(Xva))
         oof[va_idx] = pred
         for i in va_idx:
             recall[i] = index.id_to_index[rows[i]["target_vessel_id"]] in set(fc[i])
-        m = vlib.weighted_accuracy(train["vessel_name"].iloc[va_idx], train["target_vessel_id"].iloc[va_idx], pred)
-        print(f"fold {fold}: {m} ({time.time() - t0:.0f}s)", flush=True)
-    print(f"recall korean={recall[kor].mean():.4f} non_korean={recall[~kor].mean():.4f}")
+        if args.verbose:
+            m = vlib.weighted_accuracy(train["vessel_name"].iloc[va_idx], train["target_vessel_id"].iloc[va_idx], pred)
+            print(f"fold {fold}: {m} ({time.time() - t0:.0f}s)", flush=True)
     m = vlib.weighted_accuracy(train["vessel_name"], train["target_vessel_id"], oof)
-    print("CV (unseen vessels):", m)
+    print(f"split {split_seed}: recall k={recall[kor].mean():.4f} e={recall[~kor].mean():.4f} CV {m}", flush=True)
     WORK.mkdir(exist_ok=True)
     out = train.copy()
     out["pred"] = oof
-    out.to_csv(WORK / "oof.csv", index=False)
-    imp = pd.Series(model.feature_importance("gain"), index=vlib.FEATURES).sort_values(ascending=False)
-    print(imp.head(30).round(0).to_string())
+    out.to_csv(WORK / f"oof_{split_seed}.csv", index=False)
+    if args.verbose:
+        imp = pd.Series(model.feature_importance("gain"), index=vlib.FEATURES).sort_values(ascending=False)
+        print(imp.head(30).round(0).to_string())
+    return m
 
 
 def run_final(args):
@@ -160,6 +184,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--cv", action="store_true")
     ap.add_argument("--final", action="store_true")
+    ap.add_argument("--split-seeds", type=int, nargs="+", default=[-1])
+    ap.add_argument("--kw", type=float, default=KOREAN_WEIGHT)
+    ap.add_argument("--rounds", type=int, default=ROUNDS)
+    ap.add_argument("--objective", default=PARAMS["objective"])
+    ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     if a.cv:
         run_cv(a)

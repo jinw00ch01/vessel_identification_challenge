@@ -58,10 +58,18 @@ def main() -> None:
     catalog = pd.read_csv(resolve("data/vessel_catalog.csv"), encoding="utf-8-sig")
     preds = predict(test, catalog)
     result = pd.DataFrame({"sample_id": test["sample_id"], "target_vessel_id": preds})
-    targets = {BASE / "output" / "submission.csv", Path.cwd() / "output" / "submission.csv"}
+    # Write next to script.py and, if different, under the working directory.
+    targets = list(dict.fromkeys([BASE / "output" / "submission.csv", Path.cwd() / "output" / "submission.csv"]))
+    written, error = 0, None
     for path in targets:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        result.to_csv(path, index=False, encoding="utf-8")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            result.to_csv(path, index=False, encoding="utf-8")
+            written += 1
+        except OSError as exc:
+            error = exc
+    if not written:
+        raise error
     print(f"Saved {len(result)} predictions in {time.time() - start:.1f}s")
 
 
