@@ -1,0 +1,19 @@
+# Competition data must never be committed (redistribution is prohibited)
+data/
+*.csv
+open/
+open.zip
+
+# Build artifacts
+dist/
+work/
+*.zip
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Trained artifacts are rebuilt by tools/train.py --final.
+# tables.json holds lookups derived from train.csv, so it must stay out of the public repo.
+submit/model/ranker.txt
+submit/model/tables.json
