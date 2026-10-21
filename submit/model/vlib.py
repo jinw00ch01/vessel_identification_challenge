@@ -466,7 +466,7 @@ def fit_tables(train: pd.DataFrame, catalog: pd.DataFrame) -> dict:
 
 FEATURES = [
     "is_korean", "n_cand",
-    "gt_rg", "igt_rg", "min_rg", "log_ratio", "gt_exact", "igt_exact", "gt_missing",
+    "gt_alr", "igt_alr", "min_alr", "log_ratio", "gt_exact", "igt_exact", "gt_missing",
     "cgt_missing", "rg_rank", "rg_gap",
     "type_lp", "type_prior", "flag_lp", "flag_prior", "flag_missing",
     "name_count", "num_state", "cand_tokens",
@@ -622,7 +622,7 @@ class CatalogIndex:
         return np.unique(cand)
 
     def _korean_pre(self, kv: dict, cand: np.ndarray, gt: float, igt: float) -> np.ndarray:
-        """Coarse retrieval score: phonetic similarity, number/acronym agreement, tonnage gap."""
+        """Coarse retrieval score: phonetic similarity and number/acronym agreement."""
         best = np.zeros(len(cand), dtype=np.float32)
         for keys, cks in zip(self.keys, self.cks):
             pk = [keys[i] for i in cand]
@@ -636,8 +636,8 @@ class CatalogIndex:
         bonus = np.array([0.15 if (qn and self.nums[i] == qn) else (-0.15 if qn and self.nums[i] and self.nums[i] != qn else 0.0)
                           for i in cand], dtype=np.float32)
         bonus += 0.3 * self.acronym_hits(kv["acros"], cand)
-        rg = self._min_rg(cand, gt, igt)
-        return best + bonus - 0.5 * np.nan_to_num(rg, nan=0.5)
+        # name evidence only: tonnage has its own features, and evaluation tonnage may be off
+        return best + bonus
 
     def name_candidates(self, kv: dict, gt: float, igt: float, limit: int = 40, wide: int = 120) -> np.ndarray:
         """Best phonetic matches in the whole catalog, whatever the recorded tonnage says."""
@@ -700,15 +700,16 @@ class CatalogIndex:
         qflag = row.get("flag_name") if isinstance(row.get("flag_name"), str) else ""
         cgt = self.gt[cand]
         with np.errstate(invalid="ignore", divide="ignore"):
-            r1 = np.abs(gt - cgt) / cgt
-            r2 = np.abs(igt - cgt) / cgt
+            # symmetric in both directions: x/6 must look as far off as x*6
+            r1 = np.abs(np.log(gt / cgt))
+            r2 = np.abs(np.log(igt / cgt))
             lr = np.log(np.fmax(gt, igt) / cgt)
         minrg = np.fmin(r1, r2)
         F[:, COL["is_korean"]] = float(info["korean"])
         F[:, COL["n_cand"]] = m
-        F[:, COL["gt_rg"]] = r1
-        F[:, COL["igt_rg"]] = r2
-        F[:, COL["min_rg"]] = minrg
+        F[:, COL["gt_alr"]] = r1
+        F[:, COL["igt_alr"]] = r2
+        F[:, COL["min_alr"]] = minrg
         F[:, COL["log_ratio"]] = lr
         F[:, COL["gt_exact"]] = (gt == cgt).astype(np.float32)
         F[:, COL["igt_exact"]] = (igt == cgt).astype(np.float32)
