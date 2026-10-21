@@ -1,13 +1,28 @@
 [
  {
-  "file": "ranker_0.txt",
-  "drop": []
+  "file": "ranker_h0.txt",
+  "drop": [],
+  "rows": "hangul"
  },
  {
-  "file": "ranker_1.txt",
+  "file": "ranker_h1.txt",
   "drop": [
    "k_pre",
    "k_pre_rank"
-  ]
+  ],
+  "rows": "hangul"
+ },
+ {
+  "file": "ranker_l0.txt",
+  "drop": [],
+  "rows": "latin"
+ },
+ {
+  "file": "ranker_l1.txt",
+  "drop": [
+   "k_pre",
+   "k_pre_rank"
+  ],
+  "rows": "latin"
  }
 ]

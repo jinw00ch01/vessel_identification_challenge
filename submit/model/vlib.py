@@ -8,6 +8,7 @@ alone, in a subset, or in any order.
 
 from __future__ import annotations
 
+import bisect
 from collections import Counter, defaultdict
 from functools import lru_cache
 import math
@@ -75,6 +76,9 @@ def letter_tokens(name: str) -> list[str]:
 
 
 def positive_float(value) -> float:
+    if isinstance(value, str):
+        # "12,345", " 12345 " or "12345 GT" read as text
+        value = re.sub(r"[^0-9.eE+-]+$", "", re.sub(r"[,\s]", "", value))
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -521,6 +525,12 @@ def _num_state(qnums: tuple, cnums: tuple) -> int:
 
 # whole-catalog phonetic search for Hangul names: "always", or only when the record has no tonnage
 WHOLE_NAME_SEARCH = "no_tonnage"
+# also keep Hangul candidates with exactly the recorded tonnage that the name search ranked out
+EXACT_TONNAGE = True
+# Latin names: also retrieve catalog names sharing a word, nearest tonnage first
+LATIN_WORDS = True
+# ... and names with a word that starts with a record word (KENSINGTON cut to KENSIN, PAC for PACIFIC)
+LATIN_PREFIX = True
 
 
 class CatalogIndex:
@@ -587,6 +597,7 @@ class CatalogIndex:
                 postings[t].append(i)
         self.tok_df = {t: len(v) for t, v in postings.items()}
         self.postings = {t: np.array(v) for t, v in postings.items() if len(t) >= 3}
+        self.tok_sorted = sorted(self.postings)
         self.short_postings = {t: np.array(v) for t, v in postings.items() if len(t) == 2}
 
     def idf(self, token: str) -> float:
@@ -661,6 +672,22 @@ class CatalogIndex:
                 cand = np.concatenate([cand, near_shared[:20]])
             exact = self._gt_window([gt, igt], 0.0)
             cand = np.concatenate([cand, exact[:15]])
+        if LATIN_WORDS:
+            # a record may leave words out (HYUNDAI SUPREME -> SUPREME): names sharing a word, nearest tonnage first
+            posts = [self.postings[t] for t in set(letter_tokens(base))
+                     if t in self.postings and len(self.postings[t]) <= 5000]
+            if LATIN_PREFIX:
+                for t in set(letter_tokens(base)):
+                    if len(t) >= 3 and (t not in self.postings or len(t) <= 5):
+                        lo = bisect.bisect_left(self.tok_sorted, t)
+                        hi = bisect.bisect_left(self.tok_sorted, t + "~")
+                        longer = [self.postings[w] for w in self.tok_sorted[lo:hi] if w != t]
+                        if longer and sum(len(x) for x in longer) <= 5000:
+                            posts.append(np.unique(np.concatenate(longer)))
+            if posts:
+                pool, shared = np.unique(np.concatenate(posts), return_counts=True)
+                gap = np.nan_to_num(self._min_alr(pool, gt, igt), nan=9.0)
+                cand = np.concatenate([cand, pool[np.lexsort((gap, -shared))[:20]]])
         return np.unique(cand)
 
     def _korean_pre(self, kv: dict, cand: np.ndarray, gt: float, igt: float) -> np.ndarray:
@@ -737,8 +764,15 @@ class CatalogIndex:
         if math.isfinite(gt) or math.isfinite(igt):
             pool = self._gt_window([gt, igt], 0.12)
             pre = self._korean_pre(kv, pool, gt, igt)
-            order = np.argsort(-pre, kind="stable")[:limit]
-            cand, pre = pool[order], pre[order]
+            top = np.argsort(-pre, kind="stable")[:limit]
+            if EXACT_TONNAGE:
+                # same recorded tonnage, however different the name (renamed or abbreviated records)
+                cgt = self.gt[pool]
+                same = np.flatnonzero((cgt == gt) | (cgt == igt))
+                same = same[np.argsort(-pre[same], kind="stable")[:20]]
+                top = np.union1d(top, same)
+                top = top[np.argsort(-pre[top], kind="stable")]
+            cand, pre = pool[top], pre[top]
             extra = np.setdiff1d(names, cand)
         else:
             cand, pre, extra = names[:0], np.zeros(0, dtype=np.float32), names

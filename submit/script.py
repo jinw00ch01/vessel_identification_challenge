@@ -29,17 +29,22 @@ def resolve(relative: str) -> Path:
     raise FileNotFoundError(relative)
 
 
-def rank_scores(X: np.ndarray) -> np.ndarray:
-    """Average of the rankers listed in views.json, each on its own feature view."""
+def rank_scores(X: np.ndarray, korean: np.ndarray) -> np.ndarray:
+    """Average of the rankers listed in views.json, each on its own feature view and on the rows
+    it was trained for (all rows, or only Hangul or only Latin names)."""
     with open(BASE / "model" / "views.json", encoding="utf-8") as fh:
         views = json.load(fh)
-    total = np.zeros(len(X))
+    total, count = np.zeros(len(X)), np.zeros(len(X))
     for view in views:
+        mask = {"all": np.ones_like(korean), "hangul": korean, "latin": ~korean}[view.get("rows", "all")]
+        if not mask.any():
+            continue
         booster = lgb.Booster(model_file=str(BASE / "model" / view["file"]))
-        Xv = X.copy()
+        Xv = X[mask]
         Xv[:, [vlib.COL[f] for f in view["drop"]]] = np.nan
-        total += booster.predict(Xv)
-    return total / len(views)
+        total[mask] += booster.predict(Xv)
+        count[mask] += 1
+    return total / np.maximum(count, 1)
 
 
 def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
@@ -55,7 +60,8 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
         return preds
     index = vlib.CatalogIndex(catalog, tables)
     cands, feats = vlib.build_matrix(index, [rows[k] for k in todo])
-    scores = rank_scores(np.vstack(feats)) if sum(len(c) for c in cands) else np.zeros(0)
+    korean = np.repeat([vlib.is_hangul(rows[k].get("vessel_name")) for k in todo], [len(c) for c in cands])
+    scores = rank_scores(np.vstack(feats), korean) if sum(len(c) for c in cands) else np.zeros(0)
     offset = 0
     for k, cand in zip(todo, cands):
         local = scores[offset: offset + len(cand)]
