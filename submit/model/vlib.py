@@ -128,11 +128,14 @@ def _rules(th: str, ch: str, pinyin: bool = False, keep_r: bool = False):
     else:
         # vowel spellings that depend on the letters around them
         vowels = [
-            (re.compile(r"(?<=[^AEIOU])U(?=[^AEIOUY]{2}|[^AEIOUY]$)"), "O"),
+            # short U before two consonants (bulk -> 벌크), but not before an onset cluster (supreme -> 슈프림)
+            (re.compile(r"(?<=[^AEIOU])U(?=(?![PBTDKG]R)[^AEIOUY]{2}|[^AEIOUY]$)"), "O"),
             (re.compile(r"IGH"), "AI"),
             (re.compile(r"^([^AEIOU]*)A([^AEIOU])E$"), r"\1EI\2E"),
             (re.compile(r"^([^AEIOU]*)I([^AEIOU])E$"), r"\1AI\2E"),
             (re.compile(r"^([^AEIOU]+)Y$"), r"\1AI"),
+            # silent final E lengthens E too (supreme -> 슈프림, serene -> 세린)
+            (re.compile(r"(?<=[^AEIOU])E(?=[^AEIOUWXYR]E$)"), "I"),
             (re.compile(r"AY"), "EI"),
         ] + ([] if keep_r else [
             (re.compile(r"EER(?![AEIOUY])"), "IO"),
@@ -149,7 +152,9 @@ def _rules(th: str, ch: str, pinyin: bool = False, keep_r: bool = False):
             # continental spelling: R is sounded (아르페지오, 마르코) and GGI is soft
             vowels.insert(0, (re.compile(r"GG(?=[EIY])"), "J"))
     drop_r = [] if keep_r else [(re.compile(r"(?<=[AEIOU])R(?![AEIOUY])"), "")]
-    return vowels + final_i + pin + [
+    # silent initial H (honour -> 아너, hour -> 아워)
+    silent = [(re.compile(r"^H(?=ONOU?R|ONEST|OUR|EIR)"), "")]
+    return silent + vowels + final_i + pin + [
         (re.compile(r"PH"), "F"),
         (re.compile(r"^GH"), "K"),
         (re.compile(r"GH(?=T|$)"), ""),
@@ -269,6 +274,20 @@ def romanized_key(text: str) -> str:
     for c, v, j in _syllables(text):
         parts.append(("K" if c == 0 else RR_CHO[c]) + RR_JUNG[v] + ("N" if j == 21 else RR_JONG[j]))
     return english_key("".join(parts))
+
+
+# Korean romanization spellings collapsed (RR and older systems: Heung-A Young ~ 흥아영 = heungayeong)
+_KR_RULES = [(re.compile(p), r) for p, r in [
+    (r"[^A-Z]", ""), (r"EO", "O"), (r"EU", "U"), (r"OU", "O"), (r"AE", "E"), (r"OE", "E"), (r"SH", "S"),
+    (r"CH", "S"), (r"[JZ]", "S"), (r"G", "K"), (r"[BVF]", "P"), (r"D", "T"), (r"R", "L"), (r"W", "U"), (r"Y", "I"),
+]]
+
+
+def kr_key(text: str) -> str:
+    text = upper(text)
+    for pattern, repl in _KR_RULES:
+        text = pattern.sub(repl, text)
+    return collapse(text)
 
 
 def spell_acronym(token: str) -> str | None:
@@ -475,7 +494,7 @@ FEATURES = [
     "k_sim", "k_csim", "k_partial", "k_dist", "k_len_ratio", "k_sim_rank", "k_sim_gap",
     "k_csim_rank", "k_pre_rank", "k_pre", "k_tok_mean", "k_tok_min", "k_tok_cover",
     "k_dict_cov", "k_dict_hit", "k_dict_miss", "k_n_words", "k_rsim", "k_rsim_rank", "k_tok_first",
-    "k_vsim", "k_vsim_rank", "k_acro_n", "k_acro_hit",
+    "k_vsim", "k_vsim_rank", "k_acro_n", "k_acro_hit", "k_krsim", "k_krsim_rank",
     "e_idf_share", "e_idf_max", "e_last_tok",
 ]
 COL = {f: i for i, f in enumerate(FEATURES)}
@@ -500,6 +519,10 @@ def _num_state(qnums: tuple, cnums: tuple) -> int:
     return 3 if qnums else 4
 
 
+# whole-catalog phonetic search for Hangul names: "always", or only when the record has no tonnage
+WHOLE_NAME_SEARCH = "no_tonnage"
+
+
 class CatalogIndex:
     def __init__(self, catalog: pd.DataFrame, tables: dict) -> None:
         cat = catalog.reset_index(drop=True)
@@ -516,6 +539,7 @@ class CatalogIndex:
         self.cks = [[consonants(k) for k in keys] for keys in self.keys]
         self.rks = [[consonants_raw(k) for k in keys] for keys in self.keys]
         self.vks = [[vowel_skeleton(k) for k in keys] for keys in self.keys]
+        self.krk = [kr_key(b) for b in self.base]
         # per word, its distinct keys over all spelling variants; plus keys of adjacent word pairs
         self.tok_groups = [
             [list(dict.fromkeys(wk[alt][j] for alt in range(N_ALT))) for j in range(len(wk[0]))]
@@ -527,6 +551,19 @@ class CatalogIndex:
             pairs = [row[a] + row[a + 1] for row in wk for a in range(len(row) - 1)]
             self.tok_pool.append(list(dict.fromkeys(flat + pairs)))
         self.tok_first = [[k[:1] for k in wk[0]] for wk in word_keys]
+        # sound of each name word -> vessels, for records that leave words out (글로비스 세이프티 -> 세이프티)
+        word_post: dict[str, set] = defaultdict(set)
+        cons_post: dict[str, set] = defaultdict(set)
+        for i, wk in enumerate(word_keys):
+            for k in {k for alt_keys in wk for k in alt_keys}:
+                if len(k) >= 3:
+                    word_post[k].add(i)
+                if len(consonants(k)) >= 3:
+                    cons_post[consonants(k)].add(i)
+        self.word_list = list(word_post)
+        self.word_post = [np.fromiter(word_post[k], dtype=np.int64) for k in self.word_list]
+        self.cons_post = {c: np.fromiter(v, dtype=np.int64) for c, v in cons_post.items() if len(v) <= 2000}
+        self._word_cache: dict[str, list] = {}
         self.tok_sets = [set(toks) for toks in self.ltoks]
         self.nums = [numbers_of(b) for b in self.base]
         self.ntok = np.array([len(t) for t in self.ltoks], dtype=np.float32)
@@ -588,6 +625,11 @@ class CatalogIndex:
         if not found:
             return np.arange(len(self.ids))
         return np.unique(np.concatenate(found))
+
+    def _min_alr(self, cand: np.ndarray, gt: float, igt: float) -> np.ndarray:
+        cgt = self.gt[cand]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.fmin(np.abs(np.log(gt / cgt)), np.abs(np.log(igt / cgt)))
 
     def _min_rg(self, cand: np.ndarray, gt: float, igt: float) -> np.ndarray:
         cgt = self.gt[cand]
@@ -660,8 +702,38 @@ class CatalogIndex:
         adj = score - 0.01 * np.minimum(np.nan_to_num(rg, nan=3.0), 3.0)
         return top[np.argsort(-adj, kind="stable")[:limit]]
 
+    def word_candidates(self, kv: dict, gt: float, igt: float, limit: int = 30) -> np.ndarray:
+        """Vessels with a name word that sounds like one of the record's words, nearest tonnage first."""
+        idx, sim = [], []
+        for readings in kv["readings"]:
+            for r in readings:
+                if len(r) < 3:
+                    continue
+                hits = self._word_cache.get(r)
+                if hits is None:
+                    hits = [(score, self.word_post[j]) for _, score, j in
+                            process.extract(r, self.word_list, scorer=Levenshtein.normalized_similarity,
+                                            score_cutoff=0.8, limit=8)]
+                    post = self.cons_post.get(consonants(r)) if len(consonants(r)) >= 3 else None
+                    if post is not None:
+                        hits.append((0.8, post))
+                    self._word_cache[r] = hits
+                for score, post in hits:
+                    idx.append(post)
+                    sim.append(np.full(len(post), score, dtype=np.float32))
+        if not idx:
+            return np.zeros(0, dtype=np.int64)
+        idx, sim = np.concatenate(idx), np.concatenate(sim)
+        first = np.argsort(-sim, kind="stable")
+        idx, keep = np.unique(idx[first], return_index=True)
+        sim = sim[first][keep]
+        gap = np.nan_to_num(self._min_alr(idx, gt, igt), nan=9.0)
+        return idx[np.lexsort((gap, -sim))[:limit]]
+
     def korean_candidates(self, kv: dict, gt: float, igt: float, limit: int = 80):
-        names = self.name_candidates(kv, gt, igt)
+        names = self.word_candidates(kv, gt, igt)
+        if WHOLE_NAME_SEARCH == "always" or not (math.isfinite(gt) or math.isfinite(igt)):
+            names = np.union1d(names, self.name_candidates(kv, gt, igt))
         if math.isfinite(gt) or math.isfinite(igt):
             pool = self._gt_window([gt, igt], 0.12)
             pre = self._korean_pre(kv, pool, gt, igt)
@@ -807,6 +879,11 @@ class CatalogIndex:
         F[:, COL["k_rsim_rank"]] = _rank_desc(rsim)
         F[:, COL["k_vsim"]] = vsim
         F[:, COL["k_vsim_rank"]] = _rank_desc(vsim)
+        rr = kr_key("".join(romanize(w) if HANGUL_RE.search(w) else w for w in kv["words"]))
+        krsim = process.cdist([rr], [self.krk[i] for i in cand], scorer=Levenshtein.normalized_similarity,
+                              dtype=np.float32)[0]
+        F[:, COL["k_krsim"]] = krsim
+        F[:, COL["k_krsim_rank"]] = _rank_desc(krsim)
         F[:, COL["k_acro_n"]] = len(kv["acros"])
         F[:, COL["k_acro_hit"]] = self.acronym_hits(kv["acros"], cand)
         F[:, COL["k_partial"]] = part

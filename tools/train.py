@@ -43,9 +43,10 @@ ROUNDS = 400
 KOREAN_WEIGHT = 4.0
 # rankers averaged at inference: all features, and one without the crude pre-score
 VIEWS = ["none", "k_pre+k_pre_rank"]
-# train rows never have bad tonnage on Hangul records, evaluation records do
-AUG_COPIES = 2
+# copies of Hangul rows with perturbed tonnage; v4 used 2 and scored lower on Public, so off by default
+AUG_COPIES = 0
 AUG_MODE = "aug"
+AUG_NAME = 1
 
 
 def load():
@@ -172,7 +173,7 @@ def perturb(df, rng, mode):
 # jamo swaps that Hangul spellings of one foreign name commonly differ by
 _JUNG_SWAP = {1: 5, 5: 1, 4: 8, 8: 4, 6: 12, 12: 6}            # ㅐ/ㅔ, ㅓ/ㅗ, ㅕ/ㅛ
 _CHO_SWAP = {0: 15, 15: 0, 3: 16, 16: 3, 7: 17, 17: 7, 9: 10, 10: 9, 12: 14, 14: 12}  # ㄱ/ㅋ ㄷ/ㅌ ㅂ/ㅍ ㅅ/ㅆ ㅈ/ㅊ
-NAME_MODES = ("spell", "nospace", "dropword")
+NAME_MODES = ("spell", "nospace", "dropword", "dropfirst")
 
 
 def perturb_name(df, rng, mode):
@@ -182,10 +183,11 @@ def perturb_name(df, rng, mode):
     for name in df["vessel_name"]:
         if mode == "nospace":
             name = name.replace(" ", "")
-        elif mode == "dropword":
+        elif mode in ("dropword", "dropfirst"):
+            # dropfirst: the leading (often fleet or company) word left out, e.g. 글로비스 세이프티 -> 세이프티
             words = name.split()
             if len(words) >= 2:
-                del words[rng.integers(len(words))]
+                del words[0 if mode == "dropfirst" else rng.integers(len(words))]
                 name = " ".join(words)
         elif mode == "spell":
             spots = [i for i, ch in enumerate(name) if 0 <= ord(ch) - 0xAC00 < 11172
@@ -206,14 +208,19 @@ def perturb_name(df, rng, mode):
     return df
 
 
-def augment(df, rng, copies, mode="aug"):
-    """Extra training queries: copies of the Hangul rows with perturbed tonnage."""
+def augment(df, rng, copies, mode="aug", name_copies=0):
+    """Extra training queries: copies of the Hangul rows with perturbed tonnage, and copies of the
+    multi-word ones with the first word left out (half of those with perturbed tonnage too)."""
     kor = df[df["vessel_name"].map(vlib.is_hangul)]
-    if not copies or kor.empty:
-        return kor.iloc[:0]
     parts = [perturb(kor, rng, mode).assign(sample_id=lambda d, c=c: d["sample_id"] + f"_aug{c}")
              for c in range(copies)]
-    return pd.concat(parts, ignore_index=True)
+    multi = kor[kor["vessel_name"].str.split().str.len() >= 2]
+    for c in range(name_copies):
+        part = perturb_name(multi, rng, "dropfirst")
+        noisy = rng.random(len(part)) < (0.5 if copies else 0.0)
+        part = pd.concat([part[~noisy], perturb(part[noisy], rng, mode)])
+        parts.append(part.assign(sample_id=lambda d, c=c: d["sample_id"] + f"_name{c}"))
+    return pd.concat(parts, ignore_index=True) if parts else kor.iloc[:0]
 
 
 def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split_seed):
@@ -224,7 +231,9 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
     recall = np.zeros(len(train), dtype=bool)
     stress = {mode: [] for mode in args.stress}
     stress_lat = {mode: [] for mode in args.stress_latin}
-    rng_lat = np.random.default_rng(2000 + split_seed)  # separate, so Latin stress leaves the rest unchanged
+    # stress draws use their own generators, so adding a stress mode never changes the augmented training rows
+    rng_kor = np.random.default_rng(3000 + split_seed)
+    rng_lat = np.random.default_rng(2000 + split_seed)
     sel = lambda idx, seq: [seq[i] for i in idx]  # noqa: E731
     for fold, (tr_idx, va_idx) in enumerate(fold_splits(train, split_seed)):
         t0 = time.time()
@@ -235,7 +244,7 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
             fc[i], ff[i] = k_cands[k], k_feats[k]
         ff = refresh_tables(index, rows, fc, ff)
         tr_rows, tr_c, tr_f = sel(tr_idx, rows), sel(tr_idx, fc), sel(tr_idx, ff)
-        aug = augment(train.iloc[tr_idx], rng, args.aug, args.aug_mode).to_dict("records")
+        aug = augment(train.iloc[tr_idx], rng, args.aug, args.aug_mode, args.aug_name).to_dict("records")
         if aug:
             a_c, a_f = vlib.build_matrix(index, aug)
             tr_rows, tr_c, tr_f = tr_rows + aug, tr_c + a_c, tr_f + a_f
@@ -262,13 +271,14 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
         va_kor = [i for i in va_idx if kor[i]]
         for mode in args.stress:
             pert = perturb_name if mode in NAME_MODES else perturb
-            st = pert(train.iloc[va_kor], rng, mode).to_dict("records")
+            st = pert(train.iloc[va_kor], rng_kor, mode).to_dict("records")
             s_c, s_f = vlib.build_matrix(index, st)
             s_pred = argmax_ids(index, s_c, score(s_f))
             stress[mode] += [p == r["target_vessel_id"] for p, r in zip(s_pred, st)]
         va_lat = [i for i in va_idx if not kor[i]]
         for mode in args.stress_latin:
-            st = perturb(train.iloc[va_lat], rng_lat, mode).to_dict("records")
+            pert = perturb_name if mode in NAME_MODES else perturb
+            st = pert(train.iloc[va_lat], rng_lat, mode).to_dict("records")
             s_c, s_f = vlib.build_matrix(index, st)
             s_pred = argmax_ids(index, s_c, score(s_f))
             stress_lat[mode] += [p == r["target_vessel_id"] for p, r in zip(s_pred, st)]
@@ -317,7 +327,7 @@ def run_final(args):
     tables = vlib.fit_tables(train, catalog)
     index = vlib.CatalogIndex(catalog, tables)
     rows = train.to_dict("records")
-    rows += augment(train, np.random.default_rng(1000), args.aug, args.aug_mode).to_dict("records")
+    rows += augment(train, np.random.default_rng(1000), args.aug, args.aug_mode, args.aug_name).to_dict("records")
     cands, feats = vlib.build_matrix(index, rows)
     X, y, g, w = stack(index, rows, cands, feats)
     for old in MODEL_DIR.glob("ranker*.txt"):
@@ -346,6 +356,7 @@ if __name__ == "__main__":
     ap.add_argument("--drop", nargs="*", default=[], help="features every view leaves out")
     ap.add_argument("--aug", type=int, default=AUG_COPIES, help="perturbed-tonnage copies per Hangul train row")
     ap.add_argument("--aug-mode", default=AUG_MODE, help="perturb() mode for the augmented copies")
+    ap.add_argument("--aug-name", type=int, default=AUG_NAME, help="copies of multi-word Hangul rows without their first word")
     ap.add_argument("--stress", nargs="*", default=["miss", "u15", "heavy"],
                     help="CV also scores Hangul validation rows with tonnage perturbed this way")
     ap.add_argument("--stress-latin", nargs="*", default=[],
@@ -354,8 +365,10 @@ if __name__ == "__main__":
     ap.add_argument("--threads", type=int, default=PARAMS["num_threads"])
     ap.add_argument("--views", nargs="+", default=VIEWS,
                     help="rankers to average; each is 'none' or features to leave out joined by '+'")
+    ap.add_argument("--whole-name", default=vlib.WHOLE_NAME_SEARCH, choices=["always", "no_tonnage"])
     a = ap.parse_args()
     PARAMS["num_threads"] = a.threads
+    vlib.WHOLE_NAME_SEARCH = a.whole_name
     if a.cv:
         run_cv(a)
     if a.final:
