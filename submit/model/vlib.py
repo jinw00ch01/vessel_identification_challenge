@@ -554,12 +554,15 @@ HANGUL_LIMIT = 80
 HANGUL_PRE_TON = 0.0
 # ... plus this many vessels whose name best contains the record's (a word left out), by partial match
 HANGUL_PARTIAL_EXTRA = 0
+# ... plus the HANGUL_OUTER_N best name matches between that window and a wider one (tonnage far off)
+HANGUL_OUTER = 0.0
+HANGUL_OUTER_N = 0
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
-            "HANGUL_PARTIAL_EXTRA")
+            "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N")
 
 
 def current_settings() -> dict:
@@ -853,6 +856,14 @@ class CatalogIndex:
                 top = np.union1d(top, same)
                 top = top[np.argsort(-pre[top], kind="stable")]
             cand, pre = pool[top], pre[top]
+            if HANGUL_OUTER_N and HANGUL_OUTER > HANGUL_WIN:
+                outer = np.setdiff1d(self._gt_window([gt, igt], HANGUL_OUTER, hi_tol=min(0.6, HANGUL_OUTER + 0.2) if domestic else None), pool)
+                if len(outer):
+                    opre = self._korean_pre(kv, outer, gt, igt)
+                    best = np.argsort(-opre, kind="stable")[:HANGUL_OUTER_N]
+                    cand, pre = np.concatenate([cand, outer[best]]), np.concatenate([pre, opre[best]])
+                    order = np.argsort(-pre, kind="stable")
+                    cand, pre = cand[order], pre[order]
             extra = np.setdiff1d(names, cand)
         else:
             cand, pre, extra = names[:0], np.zeros(0, dtype=np.float32), names

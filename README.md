@@ -1,56 +1,121 @@
-# Vessel identification challenge (Dacon 236771)
+# 선박 식별 챌린지 (Dacon 236771)
 
-Matches each port-call record to one `vessel_id` in the official vessel catalog.
+입항 기록 한 줄마다 공식 선박 카탈로그의 `vessel_id` 하나를 찾아 매칭합니다.
 
-## Layout
+## 구성
 
-- `submit/` is exactly what goes into `submit.zip` (`script.py`, `requirements.txt`, `model/`).
-  - `submit/model/vlib.py` holds all normalisation, candidate retrieval and pair features, shared by training and inference.
-- `tools/train.py` runs grouped cross-validation (`--cv --split-seeds 1 2 3`) and trains the final rankers (`--final`, writes `submit/model/ranker_*.txt`, `views.json`, `tables.json`, and `settings.json` with the retrieval switches the rankers were trained with; `script.py` applies them, so variants share one `vlib.py`).
-- `tools/package.py --name vN --smoke` builds `dist/submit_vN.zip` and runs it in a fake server directory four times: as is (call-sign lookup answers train rows), with unseen call signs (every row goes through the ranker), on malformed rows (blank or number-only names, bad tonnage) that must not stop the run, and on Hangul names in decomposed Unicode (NFD), which `script.py` recomposes before anything else so they are still matched as Hangul.
-- `tools/probe.py` turns a submit zip into a diagnostic submission. `latin_only` keeps the predictions for non-Hangul rows and gives Hangul rows a vessel that is never a target, so its Public score is 0.3 x non-Hangul accuracy; with the base zip's own score that also gives the Hangul accuracy. `lookup_only` keeps only the rows a train call sign decides. `hangul_sure` / `latin_sure` give the dummy to ranked rows whose best score leads the second by less than `--gap`, so the drop from the base score counts the correct rows the ranker was unsure about. `latin_nameonly` / `hangul_nameonly` blank tonnage, type and flag on non-Hangul / Hangul rows before predicting. `latin_exact` keeps only Latin rows whose name is exactly a catalog name and whose prediction carries that name (65% of train Latin rows, all correct), so it counts the evaluation rows that look like train rows. `hangul_tonexact` keeps only Hangul rows whose recorded tonnage equals the predicted vessel's (71% of train Hangul rows). `nolookup` is a model variant rather than a probe: every row is ranked and train call signs are ignored.
-- `data/` (not committed) must contain the official `train.csv` and `vessel_catalog.csv`.
+- `submit/`은 `submit.zip`에 그대로 들어가는 내용입니다 (`script.py`, `requirements.txt`, `model/`).
+  - `submit/model/vlib.py`에 정규화, 후보 검색, 쌍(pair) 특징이 모두 들어 있고, 학습과 추론이 같은 코드를 씁니다.
+- `tools/train.py`는 그룹 교차검증(`--cv --split-seeds 1 2 3`)을 돌리고 최종 랭커를 학습합니다 (`--final`). 최종 학습은 `submit/model/ranker_*.txt`, `views.json`, `tables.json`, 그리고 랭커를 학습할 때 쓴 검색 설정을 담은 `settings.json`을 씁니다. `script.py`가 이 설정을 적용하므로 변형 모델들이 하나의 `vlib.py`를 공유합니다.
+- `tools/package.py --name vN --smoke`는 `dist/submit_vN.zip`을 만들고, 가짜 서버 폴더에서 네 번 실행해 봅니다.
+  1. 그대로 실행합니다. train에 있는 호출부호는 조회로 바로 답합니다.
+  2. 처음 보는 호출부호로 바꿔 실행합니다. 모든 행이 랭커를 거칩니다.
+  3. 이름이 비었거나 숫자뿐이고 톤수가 잘못된 행으로 실행합니다. 실행이 멈추면 안 됩니다.
+  4. 한글 이름을 분해형 유니코드(NFD)로 바꿔 실행합니다. `script.py`가 맨 먼저 다시 조합하므로 한글로 매칭돼야 합니다.
+- `tools/probe.py`는 제출 zip을 진단용 제출로 바꿉니다. 지정한 행 외에는 절대 정답이 아닌 더미 선박을 예측합니다.
+  - `latin_only`: 비한글 행의 예측만 남기므로 Public 점수가 0.3 x 비한글 정확도가 됩니다. 원래 zip의 점수와 함께 보면 한글 정확도도 나옵니다.
+  - `lookup_only`: train 호출부호로 결정되는 행만 남깁니다.
+  - `hangul_sure` / `latin_sure`: 1위와 2위 점수 차가 `--gap`보다 작은 행에 더미를 줍니다. 원래 점수에서 줄어든 만큼이 랭커가 확신하지 못한 정답 행의 수입니다.
+  - `latin_nameonly` / `hangul_nameonly`: 비한글 / 한글 행의 톤수, 선종, 국적을 지우고 예측합니다.
+  - `latin_exact`: 이름이 카탈로그 이름과 정확히 같고 예측도 그 이름을 가진 라틴 행만 남깁니다 (train 라틴 행의 65%이고 모두 정답). 평가 행 중 train처럼 생긴 행의 수를 셉니다.
+  - `hangul_tonexact` / `latin_tonexact`: 기록된 톤수가 예측 선박의 톤수와 정확히 같은 행만 남깁니다 (train 한글 행의 71%).
+  - `nolookup`: 진단이 아니라 모델 변형입니다. train 호출부호를 무시하고 모든 행을 랭커로 예측합니다.
+- `data/`(커밋하지 않음)에는 공식 `train.csv`와 `vessel_catalog.csv`가 있어야 합니다.
 
-## Approach
+## 방법
 
-1. Latin names: uppercase, drop `M/V`-style prefixes, keep alphanumerics, retrieve catalog names within Levenshtein distance 4. Renamed vessels are also retrieved by same tonnage plus a shared word, and shared words are weighted by how rare they are in the catalog. For records that leave words out or shorten them, names sharing a word with the record, or with a word the record word starts (KENSIN -> KENSINGTON), are retrieved too, nearest tonnage first.
-2. Hangul names: strip `호` / `제N호`, turn spelled-out letters into acronyms (케이엠티씨 -> KMTC) and match them as whole catalog words (제이에스 -> JS), and map both Hangul and English names to a coarse shared phonetic key. Several readings are tried per side:
-   - Hangul: plain sounds, Revised Romanization (for Korean-origin words such as 성호 -> Seongho), and ㅓ read as an unstressed English vowel (얼라이언스 -> Alliance).
-   - English: spelling rules with TH/CH alternatives (sea -> 씨, eagle -> 이글), pinyin with Korean conventions for Chinese names (장인 -> Jiangyin, 톈진 -> Tianjin, 선전 -> Shenzhen), and a continental reading that keeps R (아르페지오 -> Arpeggio).
-   - A Hangul-word -> English-word dictionary learned from train (each train row uses it without its own vessel).
-   Candidates come from within 12% gross tonnage, from catalog names that share a similar-sounding word (a record may leave words out), from vessels with exactly the recorded tonnage however different their name (when only `gross_tonnage` is given, up to 1.8x above it, since a Korean vessel's domestic gross tonnage is 5-30% below the international figure the catalog holds), and, when the record has no tonnage, from the 40 best whole-name phonetic matches in the catalog. A Korean-romanization comparison (흥아영 ~ Heung-A Young) is one of the name features.
-3. CV also scores held-out rows under input changes the overview mentions (`--stress` for Hangul rows, `--stress-latin` for the rest): tonnage blank (`miss`), only one of the two tonnage fields given (`noigt`, `nogt`), +-15% (`u15`) or heavily off (`heavy`), one or three jamo swapped (`spell`, `spell3`), a syllable left out (`dropsyl`), spaces removed (`nospace`), vessel type or flag blank (`notype`, `noflag`), a word left out (`dropfirst`, `droplast`, `dropword`), the first word cut to its initial (`initial`), the name cut after 60% of its letters (`trunc`), a catalog vessel renamed to each target's name (`twin`), another vessel's name on the record (`randname`, a renamed vessel), no learned Hangul dictionary (`nodict`), a useless name (`garbage`, `lgarbage`: every letter replaced), two or four random letter edits on Latin names (`lspell2`, `lspell4`) or random syllable edits on Hangul names (`hspell2`, `hspell3`), tonnage off by up to 10 or 20% (`u10`, `u20`), two to four of the edits the train names themselves show (`lgen2`-`lgen4`: a doubled letter, two neighbours swapped, a character or space left out), only the name kept (`nameonly`), type or flag taken from another record (`badtype`, `badflag`), and tonnage off by up to any percentage (`u30`). Modes can be joined with `+` (`lgen3+nameonly`). `--dump-stress` also writes one line per stressed row (record, target, pick, the target's rank among the candidates or -1 when it was not retrieved) to `work/stress_<tag><seed>.csv` for error analysis. It also reports how often the target is still among the candidates (`*_recall`) and, per mode, the shares of rows that are correct with a clear lead, correct with a lead under 5, or wrong (`*_print`), which is what the `hangul_sure` probe measures on Public. Training adds one copy of every Hangul row with its name written differently (`--name-aug mix`: first or a random word left out, or a jamo swapped) and copies of 30% of the multi-word Latin rows without their first word (`--aug-latin-name`); copies with perturbed tonnage (`--aug`) are available but off, since they lowered the Public score.
-4. LightGBM LambdaRank models score each candidate with name, tonnage, type and flag compatibility features. There are two per row type, one with every feature and one without the coarse retrieval score, and their scores are averaged; the top candidate wins. Latin rows use their own pair (`--latin-models`), the only one trained on the Latin name copies, because those copies cost Hangul accuracy in a shared model. Tonnage gaps are absolute log ratios, so a record at a sixth of the catalog tonnage looks as far off as one at six times it, and the coarse Hangul retrieval score holds name evidence only. Tonnage written as text (`12,345`, `12345 GT`) is still read as a number.
-5. A call sign seen in train maps straight to its vessel. Those rows skip retrieval entirely, so inference is fast when test vessels were seen in train.
+1. **라틴 이름**
+   - 대문자로 바꾸고 `M/V` 같은 접두어를 떼고 영숫자만 남긴 뒤, 레벤슈타인 거리 4 이내의 카탈로그 이름을 찾습니다.
+   - 이름이 바뀐 선박은 같은 톤수와 공통 단어로도 찾습니다. 공통 단어는 카탈로그에서 드문 단어일수록 무게를 줍니다.
+   - 단어를 빼먹거나 줄여 쓴 기록에 대비해, 기록과 단어를 공유하거나 기록의 단어로 시작하는 단어(KENSIN -> KENSINGTON)를 가진 이름도 톤수가 가까운 순으로 찾습니다.
+2. **한글 이름**
+   - `호` / `제N호`를 떼고, 알파벳을 읽은 소리는 약어로 바꿉니다 (케이엠티씨 -> KMTC). 이 약어는 카탈로그의 단어 전체와 맞춥니다 (제이에스 -> JS).
+   - 한글 이름과 영어 이름을 모두 거친 공통 발음 키로 바꿉니다. 양쪽마다 여러 읽기를 시도합니다.
+     - 한글: 소리 그대로, 국어의 로마자 표기법(한국어 단어용, 성호 -> Seongho), 그리고 ㅓ를 영어의 약한 모음으로 읽기 (얼라이언스 -> Alliance).
+     - 영어: TH/CH 대안을 둔 철자 규칙 (sea -> 씨, eagle -> 이글), 중국어 이름용 한국식 병음 (장인 -> Jiangyin, 톈진 -> Tianjin, 선전 -> Shenzhen), R을 살리는 유럽식 읽기 (아르페지오 -> Arpeggio).
+     - train에서 배운 한글 단어 -> 영어 단어 사전. 각 train 행은 자기 선박을 뺀 사전을 씁니다.
+   - 후보는 다음에서 모읍니다.
+     - 총톤수 12% 이내의 선박
+     - 비슷한 소리의 단어를 공유하는 카탈로그 이름 (기록이 단어를 빼먹을 수 있으므로)
+     - 이름이 아무리 달라도 기록된 톤수와 정확히 같은 선박. `gross_tonnage`만 있으면 1.8배 위까지 찾습니다. 한국 선박의 국내 총톤수는 카탈로그의 국제 총톤수보다 5-30% 작기 때문입니다.
+     - 톤수가 없는 기록은 카탈로그 전체에서 이름 전체 발음이 가장 비슷한 40척
+   - 한국어 로마자 비교(흥아영 ~ Heung-A Young)도 이름 특징 중 하나입니다.
+3. **스트레스 검증**
+   - CV는 개요에서 언급한 입력 변화를 준 검증 행도 채점합니다. 한글 행은 `--stress`, 나머지는 `--stress-latin`으로 지정합니다.
+   - 톤수
+     - 톤수 없음 (`miss`), 두 톤수 중 하나만 있음 (`noigt`, `nogt`)
+     - +-15% 오차 (`u15`), 크게 틀림 (`heavy`)
+     - 임의의 퍼센트까지 오차 (`u10`, `u20`, `u30` 등)
+   - 한글 이름
+     - 자모 1개 또는 3개 바뀜 (`spell`, `spell3`), 음절 하나 빠짐 (`dropsyl`), 공백 제거 (`nospace`)
+     - 무작위 음절 편집 (`hspell2`, `hspell3`), 첫 자음은 유지한 채 음절 2-3개 교체 (`hsyl2`, `hsyl3`)
+     - 학습한 한글 사전 없이 예측 (`nodict`)
+   - 라틴 이름
+     - 무작위 글자 편집 2개 또는 4개 (`lspell2`, `lspell4`)
+     - train 이름에 실제로 나타나는 편집 2-4개 (`lgen2`-`lgen4`: 글자 중복, 이웃 글자 교환, 글자나 공백 누락)
+   - 두 문자 공통
+     - 단어 하나 빠짐 (`dropfirst`, `droplast`, `dropword`), 첫 단어를 머리글자로 줄임 (`initial`), 이름을 글자의 60%에서 자름 (`trunc`)
+     - 카탈로그의 다른 선박을 정답 이름으로 개명 (`twin`), 다른 선박의 이름이 적힌 기록 (`randname`, 개명 선박)
+     - 쓸모없는 이름 (`garbage`, `lgarbage`: 모든 글자 교체)
+   - 다른 필드
+     - 선종 또는 국적 없음 (`notype`, `noflag`), 다른 기록의 선종 또는 국적 (`badtype`, `badflag`)
+     - 이름만 남김 (`nameonly`)
+   - 모드는 `+`로 이어 붙일 수 있습니다 (`lgen3+nameonly`).
+   - `--dump-stress`를 주면 손상된 행마다 한 줄씩 `work/stress_<tag><seed>.csv`에 오류 분석용으로 씁니다. 기록, 정답, 예측, 그리고 후보 중 정답의 순위(찾지 못했으면 -1)가 들어갑니다.
+   - 정답이 후보에 남아 있는 비율(`*_recall`)도 보고합니다. 모드마다 확실한 차이로 정답, 5 미만의 차이로 정답, 오답인 행의 비율(`*_print`)도 보고하는데, 이것이 `hangul_sure` probe가 Public에서 재는 값입니다.
+   - 학습에 추가하는 사본
+     - 모든 한글 행에 이름을 다르게 쓴 사본 하나 (`--name-aug mix`: 첫 단어나 임의의 단어 하나를 빼거나, 자모 하나를 바꿈)
+     - 여러 단어로 된 라틴 행의 30%에 첫 단어를 뺀 사본 (`--aug-latin-name`)
+     - 톤수만 흔든 사본(`--aug`)은 있지만 꺼 둡니다. Public 점수를 낮췄기 때문입니다.
+4. **랭커**
+   - LightGBM LambdaRank 모델이 이름, 톤수, 선종, 국적 호환성 특징으로 각 후보를 채점합니다.
+   - 행 종류마다 두 개를 씁니다. 하나는 모든 특징을, 다른 하나는 거친 검색 점수를 뺀 특징을 쓰고, 점수를 평균해 1위 후보를 고릅니다.
+   - 라틴 행은 따로 학습한 한 쌍(`--latin-models`)을 씁니다. 라틴 이름 사본으로 학습한 것은 이 한 쌍뿐인데, 공용 모델에 넣으면 한글 정확도가 떨어졌기 때문입니다.
+   - 톤수 차이는 로그 비율의 절댓값입니다. 그래서 카탈로그의 1/6인 기록과 6배인 기록이 똑같이 멀어 보입니다. 거친 한글 검색 점수는 이름 증거만 담습니다.
+   - 문자로 적힌 톤수(`12,345`, `12345 GT`)도 숫자로 읽습니다.
+5. **호출부호 조회**: train에 있는 호출부호는 그 선박으로 바로 매핑합니다. 이 행들은 검색을 건너뛰므로, 평가 선박이 train에 있으면 추론이 빠릅니다.
 
-Every row is predicted only from its own values, the catalog and train-derived tables.
+모든 행은 자기 행의 값, 카탈로그, train에서 만든 표만으로 예측합니다.
 
-## Results log
+## 결과 기록
 
-| Version | Grouped CV (unseen vessels) | Stress (held-out accuracy) | Public |
+| 버전 | 그룹 CV (처음 보는 선박) | 스트레스 (검증 행 정확도) | Public |
 |---|---|---|---|
-| v1 | 0.9855 (Hangul 0.9798, Latin 0.9987) | | 0.7947 |
-| v2 | 0.9956 (Hangul 0.9941, Latin 0.9992) | | 0.8017 |
-| v3 | 0.9957 (Hangul 0.9941, Latin 0.9995), mean of 3 random grouped splits | | 0.8080 |
-| v4 | 0.9950 (Hangul 0.9933, Latin 0.9990), split seed 1 | Hangul tonnage blank / +-15% / heavy 0.986 / 0.992 / 0.986 | 0.7695 |
-| v5 | 0.9962 (Hangul 0.9950, Latin 0.9991), split seed 1 | Hangul tonnage 0.987 / 0.994 / 0.988 | not submitted |
-| v6 | 0.9955 (Hangul 0.9938, Latin 0.9993), mean of split seeds 1-3 | Hangul tonnage 0.986 / 0.919 / 0.625; Hangul word dropped first / last 0.82 / 0.71; Latin first word dropped / initial / cut 0.60 / 0.73 / 0.44 | 0.8204 |
-| v7 | 0.9966 (Hangul 0.9955, Latin 0.9990), mean of split seeds 1-3 | Hangul word dropped first / last 0.86 / 0.75; Latin first word dropped / initial / cut 0.79 / 0.84 / 0.69 | not submitted (v8 instead) |
-| v8 | v7 rankers; Hangul rows with only `gross_tonnage` searched up to 1.8x above it | Hangul international tonnage blank 0.964 -> 0.994; Latin tonnage blank / +-15% / heavy 0.998 / 0.971 / 0.926; Latin 4 random edits 0.87, useless name 0.21 | 0.8275 (Hangul 0.805, Latin 0.881) |
-| v9a | 0.9962 (Hangul 0.9950, Latin 0.9990), split seed 1, same as v8 | with tonnage +-15%: Latin 4 random edits 0.72 -> 0.92, 2 edits 0.98, Latin tonnage only 0.97 -> 0.998; Hangul 2 / 3 syllables changed 0.68 -> 0.90 / 0.84, syllable dropped 0.93, Hangul tonnage only 0.92 -> 0.99 | |
-| v9b | 0.9961 (Hangul 0.9950, Latin 0.9986), split seed 1 | v9a with word drops in the copies too: Latin cut to 60% 0.72 -> 0.87, last / first word dropped with tonnage +-15% 0.44 / 0.75 -> 0.52 / 0.79; Hangul first word dropped with tonnage +-15% 0.64 -> 0.71; Hangul syllable stresses about 1 point lower | |
-| v9d | 0.9960 (Hangul 0.9950, Latin 0.9986), split seed 1 | v9b with 150 Hangul candidates, three Hangul copies and a copy of every Latin row: averaged over 11 Hangul and 10 Latin stresses, 0.837 / 0.862 against v9a's 0.821 / 0.837 | |
+| v1 | 0.9855 (한글 0.9798, 라틴 0.9987) | | 0.7947 |
+| v2 | 0.9956 (한글 0.9941, 라틴 0.9992) | | 0.8017 |
+| v3 | 0.9957 (한글 0.9941, 라틴 0.9995), 무작위 그룹 분할 3개 평균 | | 0.8080 |
+| v4 | 0.9950 (한글 0.9933, 라틴 0.9990), 분할 시드 1 | 한글 톤수 없음 / +-15% / 크게 틀림 0.986 / 0.992 / 0.986 | 0.7695 |
+| v5 | 0.9962 (한글 0.9950, 라틴 0.9991), 분할 시드 1 | 한글 톤수 0.987 / 0.994 / 0.988 | 제출 안 함 |
+| v6 | 0.9955 (한글 0.9938, 라틴 0.9993), 분할 시드 1-3 평균 | 한글 톤수 0.986 / 0.919 / 0.625; 한글 첫 / 마지막 단어 빠짐 0.82 / 0.71; 라틴 첫 단어 빠짐 / 머리글자 / 자름 0.60 / 0.73 / 0.44 | 0.8204 |
+| v7 | 0.9966 (한글 0.9955, 라틴 0.9990), 분할 시드 1-3 평균 | 한글 첫 / 마지막 단어 빠짐 0.86 / 0.75; 라틴 첫 단어 빠짐 / 머리글자 / 자름 0.79 / 0.84 / 0.69 | 제출 안 함 (대신 v8) |
+| v8 | v7 랭커; `gross_tonnage`만 있는 한글 행은 1.8배 위까지 검색 | 한글 국제 톤수 없음 0.964 -> 0.994; 라틴 톤수 없음 / +-15% / 크게 틀림 0.998 / 0.971 / 0.926; 라틴 무작위 편집 4개 0.87, 쓸모없는 이름 0.21 | 0.8275 (한글 0.805, 라틴 0.881) |
+| v9a | 0.9962 (한글 0.9950, 라틴 0.9990), 분할 시드 1, v8과 동일 | 톤수 +-15%와 함께: 라틴 무작위 편집 4개 0.72 -> 0.92, 편집 2개 0.98, 라틴 톤수만 0.97 -> 0.998; 한글 음절 2 / 3개 교체 0.68 -> 0.90 / 0.84, 음절 빠짐 0.93, 한글 톤수만 0.92 -> 0.99 | |
+| v9b | 0.9961 (한글 0.9950, 라틴 0.9986), 분할 시드 1 | v9a 사본에 단어 누락도 추가: 라틴 60%에서 자름 0.72 -> 0.87, 톤수 +-15%와 함께 마지막 / 첫 단어 빠짐 0.44 / 0.75 -> 0.52 / 0.79; 톤수 +-15%와 함께 한글 첫 단어 빠짐 0.64 -> 0.71; 한글 음절 스트레스는 약 1점 낮음 | |
+| v9d | 0.9960 (한글 0.9950, 라틴 0.9986), 분할 시드 1 | v9b에 한글 후보 150개, 한글 사본 3개, 모든 라틴 행의 사본: 한글 스트레스 11개와 라틴 스트레스 10개 평균 0.837 / 0.862 (v9a는 0.821 / 0.837) | |
 
-The Public scores of v1 and v2 were far below CV. Train Hangul rows never miss tonnage and are never more than 9.3% off, so grouped CV alone overrated the tonnage-window retrieval. On one held-out fold, the tonnage-window pipeline kept 0.989 Hangul accuracy on clean rows but fell to 0.947 with tonnage blank and 0.809 with +-15% errors. v4 is the first version trained and checked against unreliable tonnage. The same pipeline without the augmented copies scores 0.9980 (Hangul 0.9975) on clean CV but 0.976 / 0.988 / 0.950 under the three tonnage stresses.
+## 경과
 
-v4 then scored 0.7695 on Public, below v3. Trusting names over tonnage hurts on the real evaluation records, so their tonnage is probably fine and their names are what differ. v6 drops the tonnage copies, searches the whole catalog by name only when tonnage is missing, and adds word-level retrieval with training copies that leave out the first word of multi-word Hangul names: held-out Hangul rows with the first word removed go from 0.30 to 0.82.
+v1과 v2의 Public 점수는 CV보다 훨씬 낮았습니다. train의 한글 행은 톤수가 빠지는 일이 없고 오차도 9.3%를 넘지 않아서, 그룹 CV만으로는 톤수 구간 검색을 과대평가했습니다. 한 검증 폴드에서 톤수 구간 파이프라인은 깨끗한 한글 행에서 0.989였지만, 톤수가 없으면 0.947, +-15% 오차면 0.809로 떨어졌습니다. v4는 믿기 어려운 톤수에 대비해 학습하고 검증한 첫 버전입니다. 같은 파이프라인을 사본 없이 돌리면 깨끗한 CV에서 0.9980(한글 0.9975)이지만 세 가지 톤수 스트레스에서는 0.976 / 0.988 / 0.950입니다.
 
-v6 scored 0.8204, above v3, so records with only part of the name do occur, but if all of the gain came from first-word-dropped Hangul names they would be only about 3% of the Hangul rows, and most of the gap to CV is still unexplained. v7 extends the partial-name handling to Latin rows and to other kinds of shortening, and always keeps the vessels with exactly the recorded tonnage as Hangul candidates. Its Latin-only probe (`tools/probe.py --mode latin_only`) splits the Public score into Hangul and Latin accuracy, to show which of the two holds the gap. Train never has one tonnage field without the other, but on held-out Hangul rows with `international_gross_tonnage` blanked the target fell out of the candidates 3% of the time (accuracy 0.964); searching higher when only `gross_tonnage` is given brings that to 0.994 and leaves every other number unchanged. Training copies with the field blanked fixed it too, but cost accuracy on shortened names, so they stay off (`--aug-noigt`).
+그런데 v4의 Public 점수는 0.7695로 v3보다 낮았습니다. 실제 평가 기록에서는 이름보다 톤수를 덜 믿으면 손해이므로, 톤수는 대체로 괜찮고 다른 것은 이름일 가능성이 컸습니다. v6는 톤수 사본을 빼고, 톤수가 없을 때만 이름으로 카탈로그 전체를 검색하며, 단어 수준 검색을 추가했습니다. 여러 단어로 된 한글 이름에서 첫 단어를 뺀 학습 사본도 넣었습니다. 그 결과 첫 단어를 뺀 한글 검증 행은 0.30에서 0.82가 됐습니다.
 
-The 10/22 probes settled where the gap is. With v8 at 0.8275076705 and the Latin-only probe at 0.2643497758, Latin accuracy is 393/446 = 0.881 and Hangul accuracy is 428/532 = 0.805 (the scores are exact fractions; Public holds 532 Hangul rows, and with v6's exact score 0.8203608095 = 0.7 x 428/532 + 0.3 x 3059/3568 the Latin count is a multiple of 3,568, most likely 3,568, so Public has 4,100 rows: the 3,000 rows of the pre-10/18 evaluation set plus about 1,100 added when the leaderboard was reset). Both are far below CV, so the evaluation records differ from the train records for every script, not only for Hangul names. Turning the call-sign lookup off left the score identical to the last digit and the runtime unchanged, so no evaluation record carries a train call sign (the vessels differ, or call signs were hashed anew). With `hangul_sure` at 0.72882346, 75 of the 428 correct Hangul rows were ones the ranker was unsure about, where clean CV would give about 18. In CV, Latin rows keep 0.998 accuracy with tonnage blank, so names alone identify train vessels; the next probe (`latin_nameonly`) predicts Latin rows from the name alone to tell whether test names are as clean as train names (CV 0.985 under the same blanking) or whether the other fields mislead the model.
+v6는 0.8204로 v3보다 높았으므로 이름 일부만 적힌 기록이 실제로 있습니다. 하지만 이 상승이 모두 첫 단어가 빠진 한글 이름에서 왔다면 그런 행은 한글 행의 약 3%뿐이고, CV와의 차이 대부분은 여전히 설명되지 않습니다. v7은 부분 이름 처리를 라틴 행과 다른 종류의 줄임에도 넓혔고, 기록된 톤수와 정확히 같은 선박은 항상 한글 후보에 넣습니다. 라틴 전용 probe(`tools/probe.py --mode latin_only`)로 Public 점수를 한글과 라틴 정확도로 나눠, 둘 중 어느 쪽에 차이가 있는지 보게 했습니다. train에는 톤수 칸 하나만 있는 행이 없지만, 한글 검증 행에서 `international_gross_tonnage`를 지우면 정답이 후보에서 3% 빠졌습니다(정확도 0.964). `gross_tonnage`만 있을 때 더 위까지 찾게 하자 0.994가 됐고 다른 숫자는 그대로였습니다. 이 칸을 지운 학습 사본으로도 고쳐졌지만 줄인 이름의 정확도가 떨어져서 꺼 둡니다(`--aug-noigt`).
 
-The names-only probe scored 0.8113641728, so Latin rows predicted from the name alone are right 2952/3568 = 0.827 of the time against 0.881 with every field. If the evaluation names were as clean as train names this would be about 0.985, so the names are damaged; tonnage, type and flag still add 5 points, but much less than the 22 to 54 points they add in CV when train-like names are damaged, so the recorded tonnage must be looser than train's too. Under +-15% tonnage noise, held-out rows with 4 random letter edits score 0.718 with every field and 0.623 from the name alone, which matches the evaluation numbers if roughly 45% of the Latin rows are damaged that way; with a word left out instead, about a quarter of the rows would have to be damaged. Both readings call for tolerance to looser tonnage and to name damage the train records never show.
+10/22 probe로 차이가 어디 있는지 정리됐습니다. v8이 0.8275076705이고 라틴 전용 probe가 0.2643497758이므로 라틴 정확도는 3144/3568 = 0.881, 한글 정확도는 428/532 = 0.805입니다. 점수는 정확한 분수입니다. Public에는 한글 행이 532개 있고, v6의 정확한 점수 0.8203608095 = 0.7 x 428/532 + 0.3 x 3059/3568에서 라틴 행 수는 3,568의 배수, 아마 3,568입니다. 따라서 Public은 4,100행이며, 10/18 이전 평가 세트 3,000행에 리더보드 초기화 때 더해진 약 1,100행입니다. 두 정확도 모두 CV보다 훨씬 낮으므로, 한글 이름만이 아니라 모든 문자의 평가 기록이 train 기록과 다릅니다. 호출부호 조회를 끄자 점수가 마지막 자리까지 같았고 실행 시간도 그대로였습니다. 따라서 train 호출부호를 가진 평가 기록은 없습니다(선박이 다르거나 호출부호를 새로 해시했음). `hangul_sure`가 0.72882346이므로 맞힌 한글 428행 중 75행은 랭커가 확신하지 못한 행이었고, 깨끗한 CV라면 약 18행입니다. CV에서 라틴 행은 톤수를 지워도 0.998이므로 train 선박은 이름만으로 구분됩니다. 다음 probe(`latin_nameonly`)는 라틴 행을 이름만으로 예측해, 평가 이름이 train 이름만큼 깨끗한지(같은 조건의 CV 0.985), 아니면 다른 필드가 모델을 잘못 이끄는지 봅니다.
 
-v9 widens retrieval for that (`--latin-wide`: OSA distance with a cutoff of 30% of the name length, the ten best fuzzy matches always, and the 15 most similar names among vessels within 25% of the recorded tonnage; `--hangul-win 0.25` instead of 12%). On held-out rows with 4 random letter edits and +-15% tonnage, the target is then among the Latin candidates 0.97 of the time instead of 0.88; Hangul rows with 2 syllables changed go from 0.87 to 0.96. Wider retrieval alone, with rankers trained on clean rows, made those rows worse (Latin 0.718 -> 0.583): the rankers trust tonnage so much that a near-tonnage vessel with a similar name wins. v9a therefore also trains on copies with heavier damage (`--noisy-latin 0.5 --noisy-hangul 2`: half the Latin rows and every Hangul row twice, with 2 or 4 random letter edits or 3-4 train-style edits, 2-3 changed or one dropped Hangul syllables, and tonnage left alone or off by up to 10% or 20%). Clean CV stays exactly where v8 was, and the damaged rows improve by 20 points or more (table above). The tonnage damage of these copies is a mixture set by `--noisy-tonnage` (default `keep:0.35,u10:0.3,u20:0.35`), and `--noisy-fields` can also give some of them a wrong or blank vessel type or flag. Keeping 150 instead of 80 Hangul candidates (`--hangul-limit 150`) adds another 0.5-1 point on damaged Hangul rows.
+이름만 쓴 probe는 0.8113641728이었습니다. 라틴 행을 이름만으로 예측하면 2952/3568 = 0.827이 맞고, 모든 필드를 쓰면 0.881입니다. 평가 이름이 train 이름만큼 깨끗하다면 약 0.985가 나와야 하므로 이름이 손상돼 있습니다. 톤수, 선종, 국적은 여전히 5점을 더하지만, CV에서 train 같은 이름이 손상됐을 때 더하는 22-54점보다 훨씬 적으므로 기록된 톤수도 train보다 느슨할 것입니다. 톤수 +-15% 오차에서 무작위 편집 4개가 들어간 검증 행은 모든 필드로 0.718, 이름만으로 0.623이 나옵니다. 라틴 행의 약 45%가 그렇게 손상됐다면 평가 숫자와 맞습니다. 대신 단어 하나가 빠진 경우라면 약 4분의 1의 행이 손상돼 있어야 합니다. 어느 쪽이든 더 느슨한 톤수와 train에 없는 이름 손상을 견뎌야 합니다.
 
-Copies that also leave words out (`--noisy-name both`) help the word-level stresses a lot (Latin names cut to 60% go from 0.72 to 0.87) and cost about a point on Hangul syllable damage; more copies (`--noisy-hangul 3 --noisy-latin 1.0`) win most of that back. The 10/23 submissions compare v9a, v9b and v9d on Public, next to two probes (`latin_exact`, `hangul_tonexact` on v8) that count how many evaluation rows still look like train rows: if the old 3,000 rows are train-like and the new ones are not, they should score about 0.148 and 0.27.
+v9는 이를 위해 검색을 넓힙니다.
+- `--latin-wide`: 이름 길이의 30%를 기준으로 OSA 거리 검색, 퍼지 매칭 상위 10개는 항상, 기록된 톤수 25% 이내 선박 중 가장 비슷한 이름 15개.
+- `--hangul-win 0.25`: 12% 대신 25%.
+
+무작위 편집 4개와 톤수 +-15% 오차가 있는 검증 행에서, 정답이 라틴 후보에 들어가는 비율은 0.88에서 0.97이 됩니다. 음절 2개가 바뀐 한글 행은 0.87에서 0.96이 됩니다. 그러나 깨끗한 행으로 학습한 랭커에 넓은 검색만 붙이면 이 행들이 오히려 나빠졌습니다(라틴 0.718 -> 0.583). 랭커가 톤수를 너무 믿어서, 톤수가 가깝고 이름이 비슷한 선박이 이기기 때문입니다.
+
+그래서 v9a는 더 심하게 손상된 사본으로도 학습합니다(`--noisy-latin 0.5 --noisy-hangul 2`).
+- 대상: 라틴 행의 절반, 모든 한글 행은 두 번
+- 이름 손상: 무작위 글자 편집 2개나 4개, train식 편집 3-4개, 한글 음절 2-3개 교체나 1개 누락
+- 톤수: 그대로 두거나 최대 10% 또는 20% 오차
+
+깨끗한 CV는 v8과 정확히 같고, 손상된 행은 20점 이상 좋아졌습니다(위 표). 이 사본의 톤수 손상 비율은 `--noisy-tonnage`로 정하고(기본 `keep:0.35,u10:0.3,u20:0.35`), `--noisy-fields`로 일부 사본에 틀리거나 빈 선종·국적을 줄 수도 있습니다. 한글 후보를 80개 대신 150개 남기면(`--hangul-limit 150`) 손상된 한글 행에서 0.5-1점이 더 오릅니다. `--hangul-outer`, `--hangul-outer-n`을 주면 더 넓은 톤수 구간에서 이름이 가장 비슷한 선박 몇 척을 후보에 더해, 톤수가 30-40% 틀린 행도 놓치지 않습니다.
+
+단어를 빼는 사본(`--noisy-name both`)은 단어 수준 스트레스를 크게 개선하지만(라틴 60%에서 자름 0.72 -> 0.87) 한글 음절 손상에서 약 1점을 잃습니다. 사본을 더 늘리면(`--noisy-hangul 3 --noisy-latin 1.0`) 그 손실 대부분을 되찾습니다. 10/23 제출은 v9a, v9b, v9d를 Public에서 비교하고, 평가 행 중 아직 train처럼 생긴 행이 몇 개인지 세는 probe 두 개(v8 기반 `latin_exact`, `hangul_tonexact`)를 함께 냅니다. 옛 3,000행은 train과 비슷하고 새 행만 손상됐다면 두 probe는 각각 약 0.148과 0.27이 나와야 합니다.
