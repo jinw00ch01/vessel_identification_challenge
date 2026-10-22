@@ -6,6 +6,13 @@ one part of the test set:
 
     latin_only   0.3 x non-Hangul accuracy; with the base score this also gives Hangul accuracy
     lookup_only  rows decided by a call sign seen in train, nothing else
+    hangul_sure  ranked Hangul rows whose best score beats the second by less than --gap get the
+                 dummy: shows whether the misses are rows the ranker was unsure about
+    latin_sure   the same for the other rows
+
+and one variant that is a model change rather than a probe:
+
+    nolookup     call signs ignored, every row ranked (tests whether train call signs mislead)
 
 Usage:
     python tools/probe.py --base /mnt/project-files/submissions/submit_v6.zip --mode latin_only --name p1
@@ -31,11 +38,28 @@ ANCHORS = {
         "    preds = predict(test, catalog)\n"
         f"    preds = [{DUMMY!r} if vlib.is_hangul(n) else p for n, p in zip(test[\"vessel_name\"], preds)]  # probe\n",
     ),
+    "hangul_sure": (
+        "        preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]\n",
+        "        preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]\n"
+        "        if vlib.is_hangul(rows[k].get(\"vessel_name\")) and len(cand) > 1 and np.ptp(np.partition(local, -2)[-2:]) < {gap}:\n"
+        f"            preds[k] = {DUMMY!r}  # probe: unsure Hangul rows\n",
+    ),
+    "latin_sure": (
+        "        preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]\n",
+        "        preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]\n"
+        "        if not vlib.is_hangul(rows[k].get(\"vessel_name\")) and len(cand) > 1 and np.ptp(np.partition(local, -2)[-2:]) < {gap}:\n"
+        f"            preds[k] = {DUMMY!r}  # probe: unsure Latin rows\n",
+    ),
+    "nolookup": (
+        "    preds = [vlib.lookup_prediction(tables, row) for row in rows]\n",
+        "    preds = [None for row in rows]  # variant: call signs ignored, every row ranked\n",
+    ),
 }
 
 
-def build(base: Path, mode: str, name: str) -> Path:
+def build(base: Path, mode: str, name: str, gap: float = 2.0) -> Path:
     old, new = ANCHORS[mode]
+    new = new.replace("{gap}", repr(gap))
     out = ROOT / "dist" / f"submit_{name}.zip"
     out.parent.mkdir(exist_ok=True)
     with zipfile.ZipFile(base) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
@@ -55,5 +79,6 @@ if __name__ == "__main__":
     ap.add_argument("--base", type=Path, required=True)
     ap.add_argument("--mode", choices=sorted(ANCHORS), required=True)
     ap.add_argument("--name", required=True)
+    ap.add_argument("--gap", type=float, default=2.0, help="hangul_sure: score gap below which a row counts as unsure")
     a = ap.parse_args()
-    build(a.base, a.mode, a.name)
+    build(a.base, a.mode, a.name, a.gap)

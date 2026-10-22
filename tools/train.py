@@ -192,7 +192,7 @@ def perturb(df, rng, mode):
 _JUNG_SWAP = {1: 5, 5: 1, 4: 8, 8: 4, 6: 12, 12: 6}            # ㅐ/ㅔ, ㅓ/ㅗ, ㅕ/ㅛ
 _CHO_SWAP = {0: 15, 15: 0, 3: 16, 16: 3, 7: 17, 17: 7, 9: 10, 10: 9, 12: 14, 14: 12}  # ㄱ/ㅋ ㄷ/ㅌ ㅂ/ㅍ ㅅ/ㅆ ㅈ/ㅊ
 NAME_MODES = ("spell", "spell3", "dropsyl", "nospace", "dropword", "dropfirst", "droplast", "initial", "trunc",
-              "randname")
+              "randname", "garbage")
 
 
 def perturb_name(df, rng, mode):
@@ -247,6 +247,9 @@ def perturb_name(df, rng, mode):
             if spots:
                 i = spots[rng.integers(len(spots))]
                 name = name[:i] + name[i + 1:]
+        elif mode == "garbage":
+            # name useless: every Hangul syllable replaced at random, so only tonnage, type and flag are left
+            name = "".join(chr(0xAC00 + 28 * int(rng.integers(399))) if "가" <= ch <= "힣" else ch for ch in name)
         else:
             raise ValueError(mode)
         out.append(name)
@@ -301,6 +304,7 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
     rng = np.random.default_rng(1000 + split_seed)
     oof = np.empty(len(train), dtype=object)
     margin = np.full(len(train), np.nan)
+    gap = np.full(len(train), np.nan)  # best minus second-best score, known without the label
     recall = np.zeros(len(train), dtype=bool)
     stress = {mode: [] for mode in args.stress}
     stress_lat = {mode: [] for mode in args.stress_latin}
@@ -346,6 +350,9 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
             offset += len(fc[i])
             hit = fc[i] == index.id_to_index[rows[i]["target_vessel_id"]]
             recall[i] = hit.any()
+            if len(local) > 1:
+                top2 = np.partition(local, -2)[-2:]
+                gap[i] = top2[1] - top2[0]
             # target score minus the best other candidate (negative = wrong)
             if hit.any() and (~hit).any():
                 margin[i] = local[hit].max() - local[~hit].max()
@@ -403,6 +410,7 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
     out = train.copy()
     out["pred"] = oof
     out["margin"] = margin
+    out["gap"] = gap
     out.to_csv(WORK / f"oof_{args.tag}{split_seed}.csv", index=False)
     if args.verbose:
         model = next(iter(models.values()))[0][0]
