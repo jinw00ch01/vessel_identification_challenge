@@ -50,6 +50,7 @@ def rank_scores(X: np.ndarray, korean: np.ndarray) -> np.ndarray:
 def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
     with open(BASE / "model" / "tables.json", encoding="utf-8") as fh:
         tables = json.load(fh)
+    vlib.apply_settings(BASE / "model" / "settings.json")
     rows = test.to_dict("records")
     known = set(catalog["vessel_id"].astype(str))
     # A call sign seen in train decides the row on its own; rank the rest.

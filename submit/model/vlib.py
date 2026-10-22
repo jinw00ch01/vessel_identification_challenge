@@ -11,6 +11,7 @@ from __future__ import annotations
 import bisect
 from collections import Counter, defaultdict
 from functools import lru_cache
+import json
 import math
 import re
 import unicodedata
@@ -26,6 +27,7 @@ from rapidfuzz.distance import JaroWinkler, Levenshtein, OSA
 
 HANGUL_RE = re.compile("[가-힣]")
 PREFIX_RE = re.compile(r"^(?:M\s*/\s*[VT]|M\.\s*[VT]\.?|MV|MT)\s+")
+PAREN_RE = re.compile(r"\s*\([^)]*\)?")
 NO_RE = re.compile(r"\bNO\b\.?\s*(?=\d)")
 ROMAN = {"II": "2", "III": "3", "IV": "4", "VI": "6", "VII": "7", "VIII": "8", "IX": "9"}
 
@@ -45,7 +47,10 @@ def alnum(value: str) -> str:
 
 
 def strip_prefix(name: str) -> str:
-    """Drop ship-type prefixes such as 'M/V ' that never appear in the catalog."""
+    """Drop ship-type prefixes such as 'M/V ' that never appear in the catalog, and with PAREN_STRIP
+    any bracketed remark such as '(EX-SEA STAR)'."""
+    if PAREN_STRIP and "(" in name:
+        name = PAREN_RE.sub(" ", name).strip() or name
     return PREFIX_RE.sub("", name)
 
 
@@ -533,6 +538,39 @@ LATIN_WORDS = True
 LATIN_PREFIX = True
 # Hangul records with gross tonnage but no international tonnage: search further up (domestic figures are smaller)
 DOMESTIC_GT = True
+# Latin names: drop bracketed remarks; also retrieve by word-order-free spelling; edit cutoff grows with length
+PAREN_STRIP = False
+LATIN_SORTED = False
+LATIN_RELCUT = False
+# Latin names with more edits than train shows (letters wrong, added or missing): OSA distance (a swap
+# counts once) with a cutoff growing with length, the best fuzzy matches always, and the names most like
+# the record's among vessels within LATIN_TON_WIN of its tonnage
+LATIN_WIDE = False
+LATIN_TON_WIN = 0.25
+# relative tonnage window for Hangul candidates (0.12 up to v8) and how many of its best name matches to keep
+HANGUL_WIN = 0.12
+HANGUL_LIMIT = 80
+
+
+# retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
+SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
+            "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT")
+
+
+def current_settings() -> dict:
+    return {k: globals()[k] for k in SETTINGS}
+
+
+def apply_settings(path) -> None:
+    """Set the retrieval switches from a settings file, if there is one (older models have none)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            values = json.load(fh)
+    except FileNotFoundError:
+        return
+    for k, v in values.items():
+        if k in SETTINGS:
+            globals()[k] = v
 
 
 class CatalogIndex:
@@ -543,6 +581,7 @@ class CatalogIndex:
         self.up = [upper(v) for v in cat["vessel_name"]]
         self.base = [strip_prefix(u) for u in self.up]
         self.an = [alnum(b) for b in self.base]
+        self.an_sorted = ["".join(sorted(alnum(t) for t in b.split())) for b in self.base]
         self.ltoks = [letter_tokens(b) for b in self.base]
         # word keys per spelling variant; a name's key joins its word keys (same as english_key)
         word_keys = [[[english_word_key(t, alt) for t in toks] for alt in range(N_ALT)] for toks in self.ltoks]
@@ -593,6 +632,7 @@ class CatalogIndex:
         order = np.argsort(self.gt[valid], kind="stable")
         self.gt_sorted_idx = valid[order]
         self.gt_sorted = self.gt[self.gt_sorted_idx]
+        self.an_by_gt = [self.an[i] for i in self.gt_sorted_idx]
         postings: dict[str, list[int]] = defaultdict(list)
         for i, toks in enumerate(self.ltoks):
             for t in set(toks):
@@ -655,14 +695,34 @@ class CatalogIndex:
 
     def english_candidates(self, base: str, gt: float, igt: float, limit: int = 40) -> np.ndarray:
         an = alnum(base)
-        dist = process.cdist([an], self.an, scorer=Levenshtein.distance, score_cutoff=4,
-                             dtype=np.int32, workers=1)[0]
-        cand = np.flatnonzero(dist <= 4)
+        if LATIN_WIDE:
+            cut = max(4, round(0.3 * len(an)))
+            dist = process.cdist([an], self.an, scorer=OSA.distance, score_cutoff=cut, dtype=np.int32, workers=1)[0]
+        else:
+            cut = max(4, len(an) // 4) if LATIN_RELCUT else 4
+            dist = process.cdist([an], self.an, scorer=Levenshtein.distance, score_cutoff=cut,
+                                 dtype=np.int32, workers=1)[0]
+        cand = np.flatnonzero(dist <= cut)
         if len(cand) > limit:
             cand = cand[np.argsort(dist[cand], kind="stable")[:limit]]
-        if len(cand) < 5:
+        if LATIN_SORTED and len(base.split()) >= 2:
+            # the same words in another order (COURAGE GLOVIS)
+            key = "".join(sorted(alnum(t) for t in base.split()))
+            d2 = process.cdist([key], self.an_sorted, scorer=Levenshtein.distance, score_cutoff=3,
+                               dtype=np.int32, workers=1)[0]
+            more = np.flatnonzero(d2 <= 3)
+            cand = np.concatenate([cand, more[np.argsort(d2[more], kind="stable")[:20]]])
+        if LATIN_WIDE or len(cand) < 5:
             extra = process.extract(an, self.an, scorer=fuzz.ratio, limit=10)
             cand = np.concatenate([cand, np.array([e[2] for e in extra], dtype=np.int64)])
+        if LATIN_WIDE:
+            # several letters wrong and tonnage a little off: the most similar names near the recorded tonnage
+            for v in dict.fromkeys(x for x in (gt, igt) if math.isfinite(x)):
+                lo = np.searchsorted(self.gt_sorted, v / (1 + LATIN_TON_WIN), side="left")
+                hi = np.searchsorted(self.gt_sorted, v / (1 - LATIN_TON_WIN), side="right")
+                if hi > lo:
+                    sim = process.cdist([an], self.an_by_gt[lo:hi], scorer=fuzz.ratio, dtype=np.float32, workers=1)[0]
+                    cand = np.concatenate([cand, self.gt_sorted_idx[lo:hi][np.argsort(-sim, kind="stable")[:15]]])
         # renamed vessels: same tonnage and a shared distinctive word
         if math.isfinite(gt) or math.isfinite(igt):
             near = self._gt_window([gt, igt], 0.002)
@@ -768,7 +828,7 @@ class CatalogIndex:
         if math.isfinite(gt) or math.isfinite(igt):
             # gross tonnage alone may be the domestic figure, up to ~45% below the international one in the catalog
             domestic = DOMESTIC_GT and math.isfinite(gt) and not math.isfinite(igt)
-            pool = self._gt_window([gt, igt], 0.12, hi_tol=0.45 if domestic else None)
+            pool = self._gt_window([gt, igt], HANGUL_WIN, hi_tol=0.45 if domestic else None)
             pre = self._korean_pre(kv, pool, gt, igt)
             top = np.argsort(-pre, kind="stable")[:limit]
             if EXACT_TONNAGE:
@@ -797,7 +857,7 @@ class CatalogIndex:
         if is_hangul(name):
             exclude = row.get("target_vessel_id") if isinstance(row.get("target_vessel_id"), str) else None
             kv = korean_variants(name, self.tables, exclude)
-            cand, pre = self.korean_candidates(kv, gt, igt)
+            cand, pre = self.korean_candidates(kv, gt, igt, limit=HANGUL_LIMIT)
             return cand, {"korean": True, "kv": kv, "pre": pre}
         base = strip_prefix(name)
         return self.english_candidates(base, gt, igt), {"korean": False}

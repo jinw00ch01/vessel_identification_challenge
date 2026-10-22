@@ -57,6 +57,16 @@ LATIN_NAME_FRAC = 0.3
 LATIN_MODELS = True
 # share of Hangul rows copied with international tonnage blank (gross tonnage alone, often the domestic figure)
 NOIGT_FRAC = 0.0
+# extra copies with a broad mixture of name damage the train records never show (word order, extra
+# tokens, several edits, syllables changed, words dropped): Hangul rows each get one, and this share of
+# Latin rows gets one (Latin copies train only the Latin rankers)
+BROAD_HANGUL = 0
+BROAD_LATIN_FRAC = 0.0
+# copies with heavier spelling damage and looser tonnage than train shows (the Public probes point to records
+# with several letters or syllables wrong and tonnage off by up to ~15%): this many per Hangul row, and one
+# for this share of Latin rows (Latin copies train only the Latin rankers)
+NOISY_HANGUL = 0
+NOISY_LATIN_FRAC = 0.0
 
 
 def load():
@@ -175,8 +185,8 @@ def perturb(df, rng, mode):
     igt = df["international_gross_tonnage"].to_numpy(float)
     if mode == "miss":
         f1 = f2 = np.full(n, np.nan)
-    elif mode == "u15":
-        f1 = f2 = rng.uniform(0.85, 1.15, n)
+    elif mode in ("u10", "u15", "u20"):
+        f1 = f2 = rng.uniform(1 - int(mode[1:]) / 100, 1 + int(mode[1:]) / 100, n)
     elif mode == "heavy":
         f1 = f2 = np.exp(rng.choice([-1.0, 1.0], n) * rng.uniform(0.1, 0.6, n))
     elif mode in ("noigt", "nogt"):
@@ -210,7 +220,7 @@ _JUNG_SWAP = {1: 5, 5: 1, 4: 8, 8: 4, 6: 12, 12: 6}            # ㅐ/ㅔ, ㅓ/�
 _CHO_SWAP = {0: 15, 15: 0, 3: 16, 16: 3, 7: 17, 17: 7, 9: 10, 10: 9, 12: 14, 14: 12}  # ㄱ/ㅋ ㄷ/ㅌ ㅂ/ㅍ ㅅ/ㅆ ㅈ/ㅊ
 NAME_MODES = ("spell", "spell3", "dropsyl", "nospace", "dropword", "dropfirst", "droplast", "initial", "trunc",
               "randname", "garbage", "lspell2", "lspell4", "lgarbage",
-              "lgen2", "lgen3", "lgen4")
+              "lgen2", "lgen3", "lgen4", "wordswap", "hsyl2", "hsyl3", "addtoken", "hspell2", "hspell3")
 
 
 def perturb_name(df, rng, mode):
@@ -291,6 +301,40 @@ def perturb_name(df, rng, mode):
                     name = name[:i] + name[i + 1] + name[i] + name[i + 2:]
                 elif len(name) > 3:
                     name = name[:i] + name[i + 1:]
+        elif mode == "wordswap":
+            # word order reversed (COURAGE GLOVIS, 커리지 글로비스)
+            words = name.split()
+            if len(words) >= 2:
+                name = " ".join(words[::-1])
+        elif mode in ("hsyl2", "hsyl3"):
+            # two or three Hangul syllables replaced by a random syllable of the same initial consonant
+            for _ in range(int(mode[-1])):
+                spots = [i for i, ch in enumerate(name) if "가" <= ch <= "힣"]
+                if spots:
+                    i = spots[rng.integers(len(spots))]
+                    cho = (ord(name[i]) - 0xAC00) // 588
+                    name = name[:i] + chr(0xAC00 + cho * 588 + 28 * int(rng.integers(21)) + int(rng.integers(2)) * 4) + name[i + 1:]
+        elif mode in ("hspell2", "hspell3"):
+            # Hangul name with 2 or 3 random syllable edits (any syllable substituted or inserted, one left
+            # out, or two neighbours swapped), the Hangul counterpart of lspell
+            for _ in range(int(mode[-1])):
+                i = int(rng.integers(max(len(name), 1)))
+                op = int(rng.integers(4))
+                ch = chr(0xAC00 + 28 * int(rng.integers(399)) + int(rng.integers(2)) * 4)
+                if op == 0 and "가" <= name[i:i + 1] <= "힣":
+                    name = name[:i] + ch + name[i + 1:]
+                elif op == 1:
+                    name = name[:i] + ch + name[i:]
+                elif op == 2 and len(name) > 2:
+                    name = name[:i] + name[i + 1:]
+                elif i + 1 < len(name):
+                    name = name[:i] + name[i + 1] + name[i] + name[i + 2:]
+        elif mode == "addtoken":
+            # a prefix or suffix the train names never carry
+            if vlib.is_hangul(name):
+                name = [lambda x: x + "호", lambda x: "엠브이 " + x, lambda x: x + " 선박"][int(rng.integers(3))](name)
+            else:
+                name = [lambda x: "MV " + x, lambda x: "M.T. " + x, lambda x: x + " (EX-" + x.split()[0] + " STAR)"][int(rng.integers(3))](name)
         elif mode == "lgarbage":
             # Latin name useless: every letter replaced at random
             name = "".join(chr(65 + int(rng.integers(26))) if ch.isalpha() else ch for ch in name)
@@ -309,6 +353,80 @@ def compose(df, rng, mode):
     for part in mode.split("+"):
         df = (perturb_name if part in NAME_MODES else perturb)(df, rng, part)
     return df
+
+
+# (mode, weight, multi-word names only); single-word names draw only from the modes that apply to them
+HANGUL_BROAD = [("hsyl2", 0.2, False), ("hsyl3", 0.1, False), ("wordswap", 0.15, True), ("droplast", 0.1, True),
+                ("trunc", 0.1, False), ("addtoken", 0.1, False), ("dropsyl", 0.1, False), ("spell3", 0.05, False),
+                ("dropword", 0.1, True)]
+LATIN_BROAD = [("wordswap", 0.15, True), ("lgen2", 0.15, False), ("lgen3", 0.1, False), ("lspell2", 0.1, False),
+               ("addtoken", 0.1, False), ("dropfirst", 0.1, True), ("droplast", 0.1, True), ("trunc", 0.1, False),
+               ("initial", 0.05, True), ("lspell4", 0.05, False)]
+
+
+def broad_copy(df, rng, mixture):
+    """One damaged copy of each row, the damage drawn from the mixture."""
+    if df.empty:
+        return df
+    multi = df["vessel_name"].str.split().str.len().to_numpy() >= 2
+    choice = np.empty(len(df), dtype=object)
+    for is_multi in (True, False):
+        rows = np.flatnonzero(multi == is_multi)
+        modes = [(m, w) for m, w, needs_multi in mixture if is_multi or not needs_multi]
+        w = np.array([w for _, w in modes])
+        choice[rows] = [modes[k][0] for k in rng.choice(len(modes), len(rows), p=w / w.sum())]
+    return pd.concat([perturb_name(df[choice == m], rng, m) for m in dict.fromkeys(choice) if (choice == m).any()])
+
+
+# name damage for the noisy copies: (mode, weight, multi-word names only). "spell" holds letter- and
+# syllable-level edits, "word" leaves words out or shortens the name, "both" mixes the two halves
+NOISY_NAME = "spell"
+NOISY_MIXES = {
+    "hangul": {
+        "spell": [("hsyl2", 0.2, False), ("hsyl3", 0.1, False), ("hspell2", 0.2, False), ("spell3", 0.15, False),
+                  ("dropsyl", 0.15, False), ("keep", 0.2, False)],
+        "word": [("dropfirst", 0.25, True), ("droplast", 0.25, True), ("dropword", 0.1, True), ("trunc", 0.15, False),
+                 ("dropsyl", 0.1, False), ("keep", 0.15, False)],
+    },
+    "latin": {
+        "spell": [("lspell2", 0.25, False), ("lspell4", 0.25, False), ("lgen3", 0.2, False), ("lgen4", 0.2, False),
+                  ("keep", 0.1, False)],
+        "word": [("dropfirst", 0.25, True), ("droplast", 0.25, True), ("dropword", 0.1, True), ("trunc", 0.15, False),
+                 ("initial", 0.1, True), ("lgen2", 0.05, False), ("keep", 0.1, False)],
+    },
+}
+TONNAGE_NOISY = [("keep", 0.35), ("u10", 0.3), ("u20", 0.35)]
+
+
+def noisy_mix(script: str) -> list:
+    mixes = NOISY_MIXES[script]
+    if NOISY_NAME == "both":
+        return [(m, w / 2, multi) for half in ("spell", "word") for m, w, multi in mixes[half]]
+    return mixes[NOISY_NAME]
+
+
+def noisy_copy(df, rng, name_mix, tonnage_mix=TONNAGE_NOISY):
+    """One copy of each row with a name damage and a tonnage damage drawn per row from the mixtures
+    (single-word names draw only from the modes that apply to them)."""
+    if df.empty:
+        return df
+    multi = df["vessel_name"].str.split().str.len().to_numpy() >= 2
+    names = np.empty(len(df), dtype=object)
+    for is_multi in (True, False):
+        rows = np.flatnonzero(multi == is_multi)
+        modes = [(m, w) for m, w, needs_multi in name_mix if is_multi or not needs_multi]
+        w = np.array([w for _, w in modes])
+        names[rows] = [modes[k][0] for k in rng.choice(len(modes), len(rows), p=w / w.sum())]
+    w = np.array([w for _, w in tonnage_mix])
+    tonnage = np.array([m for m, _ in tonnage_mix], dtype=object)[rng.choice(len(tonnage_mix), len(df), p=w / w.sum())]
+    parts = []
+    for nm in dict.fromkeys(names):
+        for tm in dict.fromkeys(tonnage):
+            sub = df[(names == nm) & (tonnage == tm)]
+            if len(sub):
+                sub = sub if nm == "keep" else perturb_name(sub, rng, nm)
+                parts.append(sub if tm == "keep" else perturb(sub, rng, tm))
+    return pd.concat(parts)
 
 
 def augment(df, rng, copies, mode="aug", name_copies=0):
@@ -347,6 +465,18 @@ def augment(df, rng, copies, mode="aug", name_copies=0):
         lat = df[~df["vessel_name"].map(vlib.is_hangul) & (df["vessel_name"].str.split().str.len() >= 2)]
         lat = lat[rng.random(len(lat)) < LATIN_NAME_FRAC]
         parts.append(perturb_name(lat, rng, "dropfirst").assign(sample_id=lambda d: d["sample_id"] + "_lname"))
+    for c in range(BROAD_HANGUL):
+        parts.append(broad_copy(kor, rng, HANGUL_BROAD).assign(sample_id=lambda d, c=c: d["sample_id"] + f"_broad{c}"))
+    if BROAD_LATIN_FRAC:
+        lat = df[~df["vessel_name"].map(vlib.is_hangul)]
+        lat = lat[rng.random(len(lat)) < BROAD_LATIN_FRAC]
+        parts.append(broad_copy(lat, rng, LATIN_BROAD).assign(sample_id=lambda d: d["sample_id"] + "_b_lname"))
+    for c in range(NOISY_HANGUL):
+        parts.append(noisy_copy(kor, rng, noisy_mix("hangul")).assign(sample_id=lambda d, c=c: d["sample_id"] + f"_noisy{c}"))
+    if NOISY_LATIN_FRAC:
+        lat = df[~df["vessel_name"].map(vlib.is_hangul)]
+        lat = lat[rng.random(len(lat)) < NOISY_LATIN_FRAC]
+        parts.append(noisy_copy(lat, rng, noisy_mix("latin")).assign(sample_id=lambda d: d["sample_id"] + "_n_lname"))
     if NOIGT_FRAC:
         part = kor[kor["international_gross_tonnage"].notna() & (rng.random(len(kor)) < NOIGT_FRAC)]
         parts.append(part.assign(international_gross_tonnage=np.nan, sample_id=lambda d: d["sample_id"] + "_noigt"))
@@ -546,7 +676,9 @@ def run_final(args):
         json.dump(views, fh, indent=1)
     with open(MODEL_DIR / "tables.json", "w", encoding="utf-8") as fh:
         json.dump(tables, fh, ensure_ascii=False)
-    print(f"saved {len(views)} ranker(s) and tables")
+    with open(MODEL_DIR / "settings.json", "w", encoding="utf-8") as fh:
+        json.dump(vlib.current_settings(), fh, indent=1)
+    print(f"saved {len(views)} ranker(s), tables and settings {vlib.current_settings()}")
 
 
 if __name__ == "__main__":
@@ -585,6 +717,24 @@ if __name__ == "__main__":
                     help="separate rankers for Latin rows, the only ones trained on the Latin name copies")
     ap.add_argument("--domestic", action=argparse.BooleanOptionalAction, default=vlib.DOMESTIC_GT,
                     help="Hangul records with gross tonnage only: search up to ~1.8x above it")
+    ap.add_argument("--paren", action=argparse.BooleanOptionalAction, default=vlib.PAREN_STRIP,
+                    help="drop bracketed remarks from Latin names")
+    ap.add_argument("--latin-sorted", action=argparse.BooleanOptionalAction, default=vlib.LATIN_SORTED,
+                    help="also retrieve Latin names with the same words in another order")
+    ap.add_argument("--latin-relcut", action=argparse.BooleanOptionalAction, default=vlib.LATIN_RELCUT,
+                    help="Latin edit-distance retrieval cutoff grows with name length")
+    ap.add_argument("--broad-hangul", type=int, default=BROAD_HANGUL, help="broad-damage copies per Hangul row")
+    ap.add_argument("--broad-latin", type=float, default=BROAD_LATIN_FRAC, help="share of Latin rows with a broad-damage copy")
+    ap.add_argument("--noisy-hangul", type=int, default=NOISY_HANGUL, help="heavy-spelling/loose-tonnage copies per Hangul row")
+    ap.add_argument("--noisy-latin", type=float, default=NOISY_LATIN_FRAC,
+                    help="share of Latin rows with a heavy-spelling/loose-tonnage copy")
+    ap.add_argument("--noisy-name", default=NOISY_NAME, choices=["spell", "word", "both"],
+                    help="name damage in the noisy copies: letter/syllable edits, words left out, or both")
+    ap.add_argument("--latin-wide", action=argparse.BooleanOptionalAction, default=vlib.LATIN_WIDE,
+                    help="Latin retrieval for heavier spelling damage (OSA cutoff by length, tonnage-window fuzzy matches)")
+    ap.add_argument("--latin-ton-win", type=float, default=vlib.LATIN_TON_WIN)
+    ap.add_argument("--hangul-win", type=float, default=vlib.HANGUL_WIN, help="relative tonnage window for Hangul candidates")
+    ap.add_argument("--hangul-limit", type=int, default=vlib.HANGUL_LIMIT, help="best name matches kept from that window")
     ap.add_argument("--aug-noigt", type=float, default=NOIGT_FRAC,
                     help="share of Hangul rows copied with the international tonnage blank")
     a = ap.parse_args()
@@ -597,6 +747,18 @@ if __name__ == "__main__":
     LATIN_NAME_FRAC = a.aug_latin_name
     vlib.DOMESTIC_GT = a.domestic
     NOIGT_FRAC = a.aug_noigt
+    BROAD_HANGUL = a.broad_hangul
+    vlib.PAREN_STRIP = a.paren
+    vlib.LATIN_SORTED = a.latin_sorted
+    vlib.LATIN_RELCUT = a.latin_relcut
+    BROAD_LATIN_FRAC = a.broad_latin
+    NOISY_HANGUL = a.noisy_hangul
+    NOISY_LATIN_FRAC = a.noisy_latin
+    NOISY_NAME = a.noisy_name
+    vlib.LATIN_WIDE = a.latin_wide
+    vlib.LATIN_TON_WIN = a.latin_ton_win
+    vlib.HANGUL_WIN = a.hangul_win
+    vlib.HANGUL_LIMIT = a.hangul_limit
     if a.cv:
         run_cv(a)
     if a.final:

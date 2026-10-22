@@ -58,6 +58,31 @@ ANCHORS = {
         "    latin = ~test[\"vessel_name\"].map(vlib.is_hangul)  # probe: Latin rows keep only their name\n"
         "    test.loc[latin, [\"gross_tonnage\", \"international_gross_tonnage\", \"vessel_type\", \"flag_name\"]] = np.nan\n",
     ),
+    "hangul_nameonly": (
+        "    catalog = pd.read_csv(resolve(\"data/vessel_catalog.csv\"), encoding=\"utf-8-sig\")\n",
+        "    catalog = pd.read_csv(resolve(\"data/vessel_catalog.csv\"), encoding=\"utf-8-sig\")\n"
+        "    hangul = test[\"vessel_name\"].map(vlib.is_hangul)  # probe: Hangul rows keep only their name\n"
+        "    test.loc[hangul, [\"gross_tonnage\", \"international_gross_tonnage\", \"vessel_type\", \"flag_name\"]] = np.nan\n",
+    ),
+    "latin_exact": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    # probe: only Latin rows whose name is exactly a catalog name and whose prediction carries that name\n"
+        "    cat_an = dict(zip(catalog[\"vessel_id\"].astype(str), [vlib.alnum(vlib.strip_prefix(vlib.upper(v))) for v in catalog[\"vessel_name\"]]))\n"
+        "    known_an = set(cat_an.values())\n"
+        "    q_an = [vlib.alnum(vlib.strip_prefix(vlib.upper(v))) for v in test[\"vessel_name\"]]\n"
+        f"    preds = [p if (not vlib.is_hangul(n) and q and q in known_an and cat_an.get(p) == q) else {DUMMY!r}\n"
+        "             for n, q, p in zip(test[\"vessel_name\"], q_an, preds)]\n",
+    ),
+    "hangul_tonexact": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    # probe: only Hangul rows whose gross or international tonnage equals the predicted vessel's tonnage\n"
+        "    cat_gt = dict(zip(catalog[\"vessel_id\"].astype(str), [vlib.positive_float(v) for v in catalog[\"gross_tonnage\"]]))\n"
+        "    gts = [(vlib.positive_float(a), vlib.positive_float(b)) for a, b in zip(test[\"gross_tonnage\"], test[\"international_gross_tonnage\"])]\n"
+        f"    preds = [p if (vlib.is_hangul(n) and np.isfinite(cat_gt.get(p, np.nan)) and cat_gt[p] in g) else {DUMMY!r}\n"
+        "             for n, g, p in zip(test[\"vessel_name\"], gts, preds)]\n",
+    ),
     "nolookup": (
         "    preds = [vlib.lookup_prediction(tables, row) for row in rows]\n",
         "    preds = [None for row in rows]  # variant: call signs ignored, every row ranked\n",
