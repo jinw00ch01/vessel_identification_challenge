@@ -9,6 +9,8 @@ one part of the test set:
     hangul_sure  ranked Hangul rows whose best score beats the second by less than --gap get the
                  dummy: shows whether the misses are rows the ranker was unsure about
     latin_sure   the same for the other rows
+    latin_nameonly  non-Hangul rows lose tonnage, type and flag before prediction (Hangul rows unchanged):
+                 compared with CV under the same blanking, shows whether test names are like train names
 
 and one variant that is a model change rather than a probe:
 
@@ -49,6 +51,12 @@ ANCHORS = {
         "        preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]\n"
         "        if not vlib.is_hangul(rows[k].get(\"vessel_name\")) and len(cand) > 1 and np.ptp(np.partition(local, -2)[-2:]) < {gap}:\n"
         f"            preds[k] = {DUMMY!r}  # probe: unsure Latin rows\n",
+    ),
+    "latin_nameonly": (
+        "    catalog = pd.read_csv(resolve(\"data/vessel_catalog.csv\"), encoding=\"utf-8-sig\")\n",
+        "    catalog = pd.read_csv(resolve(\"data/vessel_catalog.csv\"), encoding=\"utf-8-sig\")\n"
+        "    latin = ~test[\"vessel_name\"].map(vlib.is_hangul)  # probe: Latin rows keep only their name\n"
+        "    test.loc[latin, [\"gross_tonnage\", \"international_gross_tonnage\", \"vessel_type\", \"flag_name\"]] = np.nan\n",
     ),
     "nolookup": (
         "    preds = [vlib.lookup_prediction(tables, row) for row in rows]\n",

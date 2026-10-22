@@ -102,6 +102,19 @@ def argmax_ids(index, cands, scores):
     return out
 
 
+SURE_GAP = 5.0  # tools/probe.py hangul_sure default: rows below it count as unsure
+
+
+def row_gaps(cands, scores):
+    """Best minus second-best score per row (inf with one candidate), as the probes compute it."""
+    out, offset = [], 0
+    for cand in cands:
+        local = scores[offset: offset + len(cand)]
+        offset += len(cand)
+        out.append(float(np.ptp(np.partition(local, -2)[-2:])) if len(local) > 1 else np.inf)
+    return np.array(out)
+
+
 def train_model(X, y, groups, w, rounds=ROUNDS, params=PARAMS):
     ds = lgb.Dataset(X, y, weight=w, group=groups if params["objective"] != "binary" else None,
                      feature_name=vlib.FEATURES, free_raw_data=False)
@@ -153,6 +166,10 @@ def perturb(df, rng, mode):
         # 일부 정보의 누락: train never lacks a vessel type
         df["vessel_type" if mode == "notype" else "flag_name"] = None
         return df
+    if mode == "nameonly":
+        # only the name kept: what the name alone is worth (tools/probe.py latin_nameonly does the same)
+        df[["gross_tonnage", "international_gross_tonnage", "vessel_type", "flag_name"]] = None
+        return df
     n = len(df)
     gt = df["gross_tonnage"].to_numpy(float)
     igt = df["international_gross_tonnage"].to_numpy(float)
@@ -192,7 +209,8 @@ def perturb(df, rng, mode):
 _JUNG_SWAP = {1: 5, 5: 1, 4: 8, 8: 4, 6: 12, 12: 6}            # ㅐ/ㅔ, ㅓ/ㅗ, ㅕ/ㅛ
 _CHO_SWAP = {0: 15, 15: 0, 3: 16, 16: 3, 7: 17, 17: 7, 9: 10, 10: 9, 12: 14, 14: 12}  # ㄱ/ㅋ ㄷ/ㅌ ㅂ/ㅍ ㅅ/ㅆ ㅈ/ㅊ
 NAME_MODES = ("spell", "spell3", "dropsyl", "nospace", "dropword", "dropfirst", "droplast", "initial", "trunc",
-              "randname", "garbage")
+              "randname", "garbage", "lspell2", "lspell4", "lgarbage",
+              "lgen2", "lgen3", "lgen4")
 
 
 def perturb_name(df, rng, mode):
@@ -247,6 +265,35 @@ def perturb_name(df, rng, mode):
             if spots:
                 i = spots[rng.integers(len(spots))]
                 name = name[:i] + name[i + 1:]
+        elif mode in ("lspell2", "lspell4"):
+            # Latin name with 2 or 4 random edits (substitution, insertion, deletion or transposition)
+            for _ in range(int(mode[-1])):
+                i = int(rng.integers(max(len(name), 1)))
+                op = int(rng.integers(4))
+                ch = chr(65 + int(rng.integers(26)))
+                if op == 0:
+                    name = name[:i] + ch + name[i + 1:]
+                elif op == 1:
+                    name = name[:i] + ch + name[i:]
+                elif op == 2 and len(name) > 3:
+                    name = name[:i] + name[i + 1:]
+                elif i + 1 < len(name):
+                    name = name[:i] + name[i + 1] + name[i] + name[i + 2:]
+        elif mode in ("lgen2", "lgen3", "lgen4"):
+            # the train noise generator's own edits, more of them: a letter doubled, two neighbours
+            # swapped or a character (space included) left out
+            for _ in range(int(mode[-1])):
+                i = int(rng.integers(max(len(name) - 1, 1)))
+                op = int(rng.integers(3))
+                if op == 0:
+                    name = name[:i] + name[i] + name[i:]
+                elif op == 1 and i + 1 < len(name):
+                    name = name[:i] + name[i + 1] + name[i] + name[i + 2:]
+                elif len(name) > 3:
+                    name = name[:i] + name[i + 1:]
+        elif mode == "lgarbage":
+            # Latin name useless: every letter replaced at random
+            name = "".join(chr(65 + int(rng.integers(26))) if ch.isalpha() else ch for ch in name)
         elif mode == "garbage":
             # name useless: every Hangul syllable replaced at random, so only tonnage, type and flag are left
             name = "".join(chr(0xAC00 + 28 * int(rng.integers(399))) if "가" <= ch <= "힣" else ch for ch in name)
@@ -254,6 +301,13 @@ def perturb_name(df, rng, mode):
             raise ValueError(mode)
         out.append(name)
     df["vessel_name"] = out
+    return df
+
+
+def compose(df, rng, mode):
+    """Stress mode, or several joined by '+' applied in turn (e.g. lgen3+nameonly)."""
+    for part in mode.split("+"):
+        df = (perturb_name if part in NAME_MODES else perturb)(df, rng, part)
     return df
 
 
@@ -309,6 +363,7 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
     stress = {mode: [] for mode in args.stress}
     stress_lat = {mode: [] for mode in args.stress_latin}
     s_recall = defaultdict(list)  # target among the candidates, per stress mode
+    s_unsure = defaultdict(list)  # ranker gap below SURE_GAP, per stress mode
     # stress draws use their own generators, so adding a stress mode never changes the augmented training rows
     rng_kor = np.random.default_rng(3000 + split_seed)
     rng_lat = np.random.default_rng(2000 + split_seed)
@@ -384,19 +439,23 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
         for mode in args.stress:
             if mode in ("twin", "nodict"):
                 continue
-            pert = perturb_name if mode in NAME_MODES else perturb
-            st = pert(train.iloc[va_kor], rng_kor, mode).to_dict("records")
+            st = compose(train.iloc[va_kor], rng_kor, mode).to_dict("records")
             s_c, s_f = vlib.build_matrix(index, st)
-            s_pred = argmax_ids(index, s_c, score(s_f, st))
+            s_scores = score(s_f, st)
+            s_pred = argmax_ids(index, s_c, s_scores)
             stress[mode] += [p == r["target_vessel_id"] for p, r in zip(s_pred, st)]
+            s_unsure[f"k_{mode}"] += list(row_gaps(s_c, s_scores) < SURE_GAP)
             s_recall[f"k_{mode}"] += [index.id_to_index[r["target_vessel_id"]] in c for c, r in zip(s_c, st)]
         va_lat = [i for i in va_idx if not kor[i]]
+        if args.stress_latin and args.latin_cap and len(va_lat) > args.latin_cap:
+            va_lat = sorted(rng_lat.choice(va_lat, args.latin_cap, replace=False).tolist())
         for mode in args.stress_latin:
-            pert = perturb_name if mode in NAME_MODES else perturb
-            st = pert(train.iloc[va_lat], rng_lat, mode).to_dict("records")
+            st = compose(train.iloc[va_lat], rng_lat, mode).to_dict("records")
             s_c, s_f = vlib.build_matrix(index, st)
-            s_pred = argmax_ids(index, s_c, score(s_f, st))
+            s_scores = score(s_f, st)
+            s_pred = argmax_ids(index, s_c, s_scores)
             stress_lat[mode] += [p == r["target_vessel_id"] for p, r in zip(s_pred, st)]
+            s_unsure[f"e_{mode}"] += list(row_gaps(s_c, s_scores) < SURE_GAP)
             s_recall[f"e_{mode}"] += [index.id_to_index[r["target_vessel_id"]] in c for c, r in zip(s_c, st)]
         if args.verbose:
             m = vlib.weighted_accuracy(train["vessel_name"].iloc[va_idx], train["target_vessel_id"].iloc[va_idx], pred)
@@ -405,6 +464,15 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
     m.update({f"k_{mode}": float(np.mean(v)) for mode, v in stress.items()})
     m.update({f"e_{mode}": float(np.mean(v)) for mode, v in stress_lat.items()})
     m.update({f"{k}_recall": round(float(np.mean(v)), 4) for k, v in s_recall.items()})
+    # probe fingerprint per mode: shares of (correct and unsure, correct and sure, wrong), as probe_sure measures
+    for k, uns in s_unsure.items():
+        ok = np.array((stress if k.startswith("k_") else stress_lat)[k[2:]], dtype=bool)
+        uns = np.array(uns, dtype=bool)
+        m[f"{k}_print"] = (round(float((ok & uns).mean()), 3), round(float((ok & ~uns).mean()), 3), round(float((~ok).mean()), 3))
+    for nm, msk in (("k_clean", kor), ("e_clean", ~kor)):
+        ok = (oof == train["target_vessel_id"].to_numpy())[msk]
+        uns = (np.nan_to_num(gap, nan=np.inf) < SURE_GAP)[msk]
+        m[f"{nm}_print"] = (round(float((ok & uns).mean()), 3), round(float((ok & ~uns).mean()), 3), round(float((~ok).mean()), 3))
     print(f"split {split_seed}: recall k={recall[kor].mean():.4f} e={recall[~kor].mean():.4f} CV {m}", flush=True)
     WORK.mkdir(exist_ok=True)
     out = train.copy()
@@ -498,6 +566,7 @@ if __name__ == "__main__":
                     help="CV also scores Hangul validation rows with tonnage perturbed this way")
     ap.add_argument("--stress-latin", nargs="*", default=[],
                     help="the same for the non-Hangul validation rows")
+    ap.add_argument("--latin-cap", type=int, default=0, help="Latin stress rows per fold (0 = all)")
     ap.add_argument("--tag", default="", help="prefix for the OOF file name")
     ap.add_argument("--threads", type=int, default=PARAMS["num_threads"])
     ap.add_argument("--views", nargs="+", default=VIEWS,
