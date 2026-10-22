@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import sys
 import time
+import unicodedata
 
 import lightgbm as lgb
 import numpy as np
@@ -51,6 +52,11 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
     with open(BASE / "model" / "tables.json", encoding="utf-8") as fh:
         tables = json.load(fh)
     vlib.apply_settings(BASE / "model" / "settings.json")
+    test = test.copy()
+    for col in ("vessel_name", "vessel_type", "flag_name"):
+        if col in test:
+            # decomposed Hangul (NFD, e.g. from a macOS export) would otherwise not count as Hangul
+            test[col] = test[col].map(lambda v: unicodedata.normalize("NFC", v) if isinstance(v, str) else v)
     rows = test.to_dict("records")
     known = set(catalog["vessel_id"].astype(str))
     # A call sign seen in train decides the row on its own; rank the rest.

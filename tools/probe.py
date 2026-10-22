@@ -11,6 +11,9 @@ one part of the test set:
     latin_sure   the same for the other rows
     latin_nameonly  non-Hangul rows lose tonnage, type and flag before prediction (Hangul rows unchanged):
                  compared with CV under the same blanking, shows whether test names are like train names
+    hangul_nameonly the same for Hangul rows
+    latin_exact  Latin rows whose name is exactly a catalog name and whose prediction carries that name
+    hangul_tonexact / latin_tonexact  rows whose recorded tonnage equals the predicted vessel's tonnage
 
 and one variant that is a model change rather than a probe:
 
@@ -81,6 +84,15 @@ ANCHORS = {
         "    cat_gt = dict(zip(catalog[\"vessel_id\"].astype(str), [vlib.positive_float(v) for v in catalog[\"gross_tonnage\"]]))\n"
         "    gts = [(vlib.positive_float(a), vlib.positive_float(b)) for a, b in zip(test[\"gross_tonnage\"], test[\"international_gross_tonnage\"])]\n"
         f"    preds = [p if (vlib.is_hangul(n) and np.isfinite(cat_gt.get(p, np.nan)) and cat_gt[p] in g) else {DUMMY!r}\n"
+        "             for n, g, p in zip(test[\"vessel_name\"], gts, preds)]\n",
+    ),
+    "latin_tonexact": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    # probe: only Latin rows whose gross or international tonnage equals the predicted vessel's tonnage\n"
+        "    cat_gt = dict(zip(catalog[\"vessel_id\"].astype(str), [vlib.positive_float(v) for v in catalog[\"gross_tonnage\"]]))\n"
+        "    gts = [(vlib.positive_float(a), vlib.positive_float(b)) for a, b in zip(test[\"gross_tonnage\"], test[\"international_gross_tonnage\"])]\n"
+        f"    preds = [p if (not vlib.is_hangul(n) and np.isfinite(cat_gt.get(p, np.nan)) and cat_gt[p] in g) else {DUMMY!r}\n"
         "             for n, g, p in zip(test[\"vessel_name\"], gts, preds)]\n",
     ),
     "nolookup": (

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 import zipfile
 
 import pandas as pd
@@ -79,6 +80,14 @@ def smoke(zip_path: Path, n_rows: int = 3000) -> None:
     odd.loc[odd.index[8:], ["gross_tonnage", "international_gross_tonnage"]] = [[None, None], [0, -5], ["abc", None], [None, 1e9]]
     odd.loc[odd.index[::3], ["flag_name", "vessel_type", "arrival_year"]] = None
     run_box(zip_path, odd, "odd", score=False)
+    # decomposed Hangul (NFD) must be matched like the composed names: the score should equal the ranker run's
+    kor = sample[sample["vessel_name"].map(vlib_is_hangul)].head(200).assign(call_sign="CS_UNSEEN")
+    kor["vessel_name"] = kor["vessel_name"].map(lambda v: unicodedata.normalize("NFD", v))
+    run_box(zip_path, kor, "nfd")
+
+
+def vlib_is_hangul(value) -> bool:
+    return isinstance(value, str) and any("가" <= ch <= "힣" for ch in value)
 
 
 if __name__ == "__main__":

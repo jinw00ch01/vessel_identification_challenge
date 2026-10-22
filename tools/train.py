@@ -176,6 +176,11 @@ def perturb(df, rng, mode):
         # 일부 정보의 누락: train never lacks a vessel type
         df["vessel_type" if mode == "notype" else "flag_name"] = None
         return df
+    if mode in ("badtype", "badflag"):
+        # the field holds another record's value (a wrong but plausible label)
+        col = "vessel_type" if mode == "badtype" else "flag_name"
+        df[col] = df[col].to_numpy()[rng.permutation(len(df))]
+        return df
     if mode == "nameonly":
         # only the name kept: what the name alone is worth (tools/probe.py latin_nameonly does the same)
         df[["gross_tonnage", "international_gross_tonnage", "vessel_type", "flag_name"]] = None
@@ -185,7 +190,8 @@ def perturb(df, rng, mode):
     igt = df["international_gross_tonnage"].to_numpy(float)
     if mode == "miss":
         f1 = f2 = np.full(n, np.nan)
-    elif mode in ("u10", "u15", "u20"):
+    elif re.fullmatch(r"u\d+", mode):
+        # uniform relative error up to the given percent, the same for both fields
         f1 = f2 = rng.uniform(1 - int(mode[1:]) / 100, 1 + int(mode[1:]) / 100, n)
     elif mode == "heavy":
         f1 = f2 = np.exp(rng.choice([-1.0, 1.0], n) * rng.uniform(0.1, 0.6, n))
@@ -396,6 +402,8 @@ NOISY_MIXES = {
     },
 }
 TONNAGE_NOISY = [("keep", 0.35), ("u10", 0.3), ("u20", 0.35)]
+# vessel type / flag damage in the noisy copies (keep only: off, and no random draws)
+FIELDS_NOISY = [("keep", 1.0)]
 
 
 def noisy_mix(script: str) -> list:
@@ -405,7 +413,7 @@ def noisy_mix(script: str) -> list:
     return mixes[NOISY_NAME]
 
 
-def noisy_copy(df, rng, name_mix, tonnage_mix=TONNAGE_NOISY):
+def noisy_copy(df, rng, name_mix, tonnage_mix=None):
     """One copy of each row with a name damage and a tonnage damage drawn per row from the mixtures
     (single-word names draw only from the modes that apply to them)."""
     if df.empty:
@@ -417,6 +425,7 @@ def noisy_copy(df, rng, name_mix, tonnage_mix=TONNAGE_NOISY):
         modes = [(m, w) for m, w, needs_multi in name_mix if is_multi or not needs_multi]
         w = np.array([w for _, w in modes])
         names[rows] = [modes[k][0] for k in rng.choice(len(modes), len(rows), p=w / w.sum())]
+    tonnage_mix = TONNAGE_NOISY if tonnage_mix is None else tonnage_mix
     w = np.array([w for _, w in tonnage_mix])
     tonnage = np.array([m for m, _ in tonnage_mix], dtype=object)[rng.choice(len(tonnage_mix), len(df), p=w / w.sum())]
     parts = []
@@ -426,7 +435,13 @@ def noisy_copy(df, rng, name_mix, tonnage_mix=TONNAGE_NOISY):
             if len(sub):
                 sub = sub if nm == "keep" else perturb_name(sub, rng, nm)
                 parts.append(sub if tm == "keep" else perturb(sub, rng, tm))
-    return pd.concat(parts)
+    out = pd.concat(parts)
+    if any(m != "keep" for m, _ in FIELDS_NOISY):
+        w = np.array([w for _, w in FIELDS_NOISY])
+        fields = np.array([m for m, _ in FIELDS_NOISY], dtype=object)[rng.choice(len(FIELDS_NOISY), len(out), p=w / w.sum())]
+        out = pd.concat([out[fields == fm] if fm == "keep" else perturb(out[fields == fm], rng, fm)
+                         for fm in dict.fromkeys(fields)])
+    return out
 
 
 def augment(df, rng, copies, mode="aug", name_copies=0):
@@ -494,6 +509,7 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
     stress_lat = {mode: [] for mode in args.stress_latin}
     s_recall = defaultdict(list)  # target among the candidates, per stress mode
     s_unsure = defaultdict(list)  # ranker gap below SURE_GAP, per stress mode
+    dump = []  # with --dump-stress: one line per stressed row (mode, record, target, prediction)
     # stress draws use their own generators, so adding a stress mode never changes the augmented training rows
     rng_kor = np.random.default_rng(3000 + split_seed)
     rng_lat = np.random.default_rng(2000 + split_seed)
@@ -576,6 +592,8 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
             stress[mode] += [p == r["target_vessel_id"] for p, r in zip(s_pred, st)]
             s_unsure[f"k_{mode}"] += list(row_gaps(s_c, s_scores) < SURE_GAP)
             s_recall[f"k_{mode}"] += [index.id_to_index[r["target_vessel_id"]] in c for c, r in zip(s_c, st)]
+            if args.dump_stress:
+                dump += stress_rows(f"k_{mode}", index, st, s_c, s_scores, s_pred)
         va_lat = [i for i in va_idx if not kor[i]]
         if args.stress_latin and args.latin_cap and len(va_lat) > args.latin_cap:
             va_lat = sorted(rng_lat.choice(va_lat, args.latin_cap, replace=False).tolist())
@@ -587,6 +605,8 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
             stress_lat[mode] += [p == r["target_vessel_id"] for p, r in zip(s_pred, st)]
             s_unsure[f"e_{mode}"] += list(row_gaps(s_c, s_scores) < SURE_GAP)
             s_recall[f"e_{mode}"] += [index.id_to_index[r["target_vessel_id"]] in c for c, r in zip(s_c, st)]
+            if args.dump_stress:
+                dump += stress_rows(f"e_{mode}", index, st, s_c, s_scores, s_pred)
         if args.verbose:
             m = vlib.weighted_accuracy(train["vessel_name"].iloc[va_idx], train["target_vessel_id"].iloc[va_idx], pred)
             print(f"fold {fold}: {m} ({time.time() - t0:.0f}s)", flush=True)
@@ -610,11 +630,27 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
     out["margin"] = margin
     out["gap"] = gap
     out.to_csv(WORK / f"oof_{args.tag}{split_seed}.csv", index=False)
+    if dump:
+        pd.DataFrame(dump).to_csv(WORK / f"stress_{args.tag}{split_seed}.csv", index=False)
     if args.verbose:
         model = next(iter(models.values()))[0][0]
         imp = pd.Series(model.feature_importance("gain"), index=vlib.FEATURES).sort_values(ascending=False)
         print(imp.head(30).round(0).to_string())
     return m
+
+
+def stress_rows(mode, index, rows, cands, scores, preds):
+    """Per-row stress outcome for error analysis: the damaged record, its target, the pick and the target's rank."""
+    out, offset = [], 0
+    for row, cand, pred in zip(rows, cands, preds):
+        local = scores[offset: offset + len(cand)]
+        offset += len(cand)
+        hit = np.flatnonzero(cand == index.id_to_index[row["target_vessel_id"]])
+        rank = int((local > local[hit[0]]).sum()) if len(hit) else -1
+        out.append({"mode": mode, "vessel_name": row["vessel_name"], "gross_tonnage": row["gross_tonnage"],
+                    "international_gross_tonnage": row["international_gross_tonnage"],
+                    "target": row["target_vessel_id"], "pred": pred, "rank": rank, "n_cand": len(cand)})
+    return out
 
 
 def model_sets(rows, cands, feats, aug, aug_matrix, latin_models):
@@ -700,6 +736,7 @@ if __name__ == "__main__":
                     help="the same for the non-Hangul validation rows")
     ap.add_argument("--latin-cap", type=int, default=0, help="Latin stress rows per fold (0 = all)")
     ap.add_argument("--tag", default="", help="prefix for the OOF file name")
+    ap.add_argument("--dump-stress", action="store_true", help="also write work/stress_<tag><seed>.csv, one line per stressed row")
     ap.add_argument("--threads", type=int, default=PARAMS["num_threads"])
     ap.add_argument("--views", nargs="+", default=VIEWS,
                     help="rankers to average; each is 'none' or features to leave out joined by '+'")
@@ -730,6 +767,10 @@ if __name__ == "__main__":
                     help="share of Latin rows with a heavy-spelling/loose-tonnage copy")
     ap.add_argument("--noisy-name", default=NOISY_NAME, choices=["spell", "word", "both"],
                     help="name damage in the noisy copies: letter/syllable edits, words left out, or both")
+    ap.add_argument("--noisy-tonnage", default=",".join(f"{m}:{w}" for m, w in TONNAGE_NOISY),
+                    help="tonnage damage mixture of the noisy copies, e.g. keep:0.35,u10:0.3,u20:0.35")
+    ap.add_argument("--noisy-fields", default=",".join(f"{m}:{w}" for m, w in FIELDS_NOISY),
+                    help="vessel type/flag damage of the noisy copies, e.g. keep:0.8,badtype:0.1,notype:0.1")
     ap.add_argument("--latin-wide", action=argparse.BooleanOptionalAction, default=vlib.LATIN_WIDE,
                     help="Latin retrieval for heavier spelling damage (OSA cutoff by length, tonnage-window fuzzy matches)")
     ap.add_argument("--latin-ton-win", type=float, default=vlib.LATIN_TON_WIN)
@@ -759,6 +800,8 @@ if __name__ == "__main__":
     NOISY_HANGUL = a.noisy_hangul
     NOISY_LATIN_FRAC = a.noisy_latin
     NOISY_NAME = a.noisy_name
+    TONNAGE_NOISY = [(m, float(w)) for m, w in (part.split(":") for part in a.noisy_tonnage.split(","))]
+    FIELDS_NOISY = [(m, float(w)) for m, w in (part.split(":") for part in a.noisy_fields.split(","))]
     vlib.LATIN_WIDE = a.latin_wide
     vlib.LATIN_TON_WIN = a.latin_ton_win
     vlib.HANGUL_WIN = a.hangul_win

@@ -1,0 +1,15 @@
+{
+ "WHOLE_NAME_SEARCH": "no_tonnage",
+ "EXACT_TONNAGE": true,
+ "LATIN_WORDS": true,
+ "LATIN_PREFIX": true,
+ "DOMESTIC_GT": true,
+ "PAREN_STRIP": false,
+ "LATIN_SORTED": false,
+ "LATIN_RELCUT": false,
+ "LATIN_WIDE": true,
+ "LATIN_TON_WIN": 0.25,
+ "HANGUL_WIN": 0.25,
+ "HANGUL_LIMIT": 150,
+ "HANGUL_PRE_TON": 0.0
+}
