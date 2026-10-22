@@ -735,6 +735,10 @@ if __name__ == "__main__":
     ap.add_argument("--latin-ton-win", type=float, default=vlib.LATIN_TON_WIN)
     ap.add_argument("--hangul-win", type=float, default=vlib.HANGUL_WIN, help="relative tonnage window for Hangul candidates")
     ap.add_argument("--hangul-limit", type=int, default=vlib.HANGUL_LIMIT, help="best name matches kept from that window")
+    ap.add_argument("--hangul-pre-ton", type=float, default=vlib.HANGUL_PRE_TON,
+                    help="pick the Hangul window's candidates by name evidence minus this x |log tonnage ratio|")
+    ap.add_argument("--hangul-partial", type=int, default=vlib.HANGUL_PARTIAL_EXTRA,
+                    help="extra Hangul candidates whose name best contains the record's")
     ap.add_argument("--aug-noigt", type=float, default=NOIGT_FRAC,
                     help="share of Hangul rows copied with the international tonnage blank")
     a = ap.parse_args()
@@ -759,6 +763,8 @@ if __name__ == "__main__":
     vlib.LATIN_TON_WIN = a.latin_ton_win
     vlib.HANGUL_WIN = a.hangul_win
     vlib.HANGUL_LIMIT = a.hangul_limit
+    vlib.HANGUL_PRE_TON = a.hangul_pre_ton
+    vlib.HANGUL_PARTIAL_EXTRA = a.hangul_partial
     if a.cv:
         run_cv(a)
     if a.final:

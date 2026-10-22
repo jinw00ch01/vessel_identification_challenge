@@ -550,11 +550,16 @@ LATIN_TON_WIN = 0.25
 # relative tonnage window for Hangul candidates (0.12 up to v8) and how many of its best name matches to keep
 HANGUL_WIN = 0.12
 HANGUL_LIMIT = 80
+# ... chosen by name evidence minus this much per unit of |log tonnage ratio| (0: name evidence only)
+HANGUL_PRE_TON = 0.0
+# ... plus this many vessels whose name best contains the record's (a word left out), by partial match
+HANGUL_PARTIAL_EXTRA = 0
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
-            "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT")
+            "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
+            "HANGUL_PARTIAL_EXTRA")
 
 
 def current_settings() -> dict:
@@ -830,7 +835,16 @@ class CatalogIndex:
             domestic = DOMESTIC_GT and math.isfinite(gt) and not math.isfinite(igt)
             pool = self._gt_window([gt, igt], HANGUL_WIN, hi_tol=0.45 if domestic else None)
             pre = self._korean_pre(kv, pool, gt, igt)
-            top = np.argsort(-pre, kind="stable")[:limit]
+            pick = pre - HANGUL_PRE_TON * np.nan_to_num(self._min_alr(pool, gt, igt), nan=1.0) if HANGUL_PRE_TON else pre
+            top = np.argsort(-pick, kind="stable")[:limit]
+            if HANGUL_PARTIAL_EXTRA:
+                part = np.zeros(len(pool), dtype=np.float32)
+                keys0 = [self.key[i] for i in pool]
+                for key in kv["keys"]:
+                    if len(key) >= 4:
+                        part = np.maximum(part, process.cdist([key], keys0, scorer=fuzz.partial_ratio, dtype=np.float32)[0])
+                top = np.union1d(top, np.argsort(-part, kind="stable")[:HANGUL_PARTIAL_EXTRA])
+                top = top[np.argsort(-pre[top], kind="stable")]
             if EXACT_TONNAGE:
                 # same recorded tonnage, however different the name (renamed or abbreviated records)
                 cgt = self.gt[pool]
