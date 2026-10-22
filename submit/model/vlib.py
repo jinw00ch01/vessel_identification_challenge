@@ -805,6 +805,8 @@ class CatalogIndex:
     def features(self, row: dict, cand: np.ndarray, info: dict) -> np.ndarray:
         m = len(cand)
         F = np.full((m, len(FEATURES)), np.nan, dtype=np.float32)
+        if not m:  # nothing retrieved (e.g. an unreadable name and no tonnage); the caller falls back
+            return F
         name = upper(row.get("vessel_name"))
         gt = positive_float(row.get("gross_tonnage"))
         igt = positive_float(row.get("international_gross_tonnage"))
