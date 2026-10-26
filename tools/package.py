@@ -24,15 +24,19 @@ DIST = ROOT / "dist"
 WORK = ROOT / "work"
 
 
-def build_zip(name: str) -> Path:
+def build_zip(name: str, model_dir: Path = SUBMIT / "model") -> Path:
     DIST.mkdir(exist_ok=True)
     path = DIST / f"submit_{name}.zip"
     assert len(path.name) <= 30, f"{path.name}: upload file names are kept to 30 characters"
-    files =[SUBMIT / "script.py", SUBMIT / "requirements.txt"]
-    files += sorted(p for p in (SUBMIT / "model").rglob("*") if p.is_file() and "__pycache__" not in p.parts)
+    # code from submit/, trained files (rankers, tables, settings) from model_dir
+    files = {"script.py": SUBMIT / "script.py", "requirements.txt": SUBMIT / "requirements.txt",
+             "model/vlib.py": SUBMIT / "model" / "vlib.py"}
+    for p in sorted(model_dir.rglob("*")):
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".py":
+            files[f"model/{p.relative_to(model_dir).as_posix()}"] = p
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in files:
-            zf.write(f, f.relative_to(SUBMIT).as_posix())
+        for arc, f in files.items():
+            zf.write(f, arc)
     print(f"wrote {path} ({path.stat().st_size / 1e6:.2f} MB)")
     with zipfile.ZipFile(path) as zf:
         print(" ", sorted(zf.namelist()))
@@ -95,7 +99,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True)
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--model-dir", type=Path, default=SUBMIT / "model", help="trained files to package (default submit/model)")
     a = ap.parse_args()
-    z = build_zip(a.name)
+    z = build_zip(a.name, a.model_dir)
     if a.smoke:
         smoke(z)

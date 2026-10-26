@@ -402,6 +402,7 @@ NOISY_MIXES = {
     },
 }
 TONNAGE_NOISY = [("keep", 0.35), ("u10", 0.3), ("u20", 0.35)]
+TONNAGE_NOISY_HANGUL = None  # tonnage mixture for the Hangul copies (None: the same as TONNAGE_NOISY)
 # vessel type / flag damage in the noisy copies (keep only: off, and no random draws)
 FIELDS_NOISY = [("keep", 1.0)]
 
@@ -487,7 +488,8 @@ def augment(df, rng, copies, mode="aug", name_copies=0):
         lat = lat[rng.random(len(lat)) < BROAD_LATIN_FRAC]
         parts.append(broad_copy(lat, rng, LATIN_BROAD).assign(sample_id=lambda d: d["sample_id"] + "_b_lname"))
     for c in range(NOISY_HANGUL):
-        parts.append(noisy_copy(kor, rng, noisy_mix("hangul")).assign(sample_id=lambda d, c=c: d["sample_id"] + f"_noisy{c}"))
+        parts.append(noisy_copy(kor, rng, noisy_mix("hangul"), TONNAGE_NOISY_HANGUL)
+                     .assign(sample_id=lambda d, c=c: d["sample_id"] + f"_noisy{c}"))
     if NOISY_LATIN_FRAC:
         lat = df[~df["vessel_name"].map(vlib.is_hangul)]
         lat = lat[rng.random(len(lat)) < NOISY_LATIN_FRAC]
@@ -691,6 +693,8 @@ def blank(X, drop):
 
 
 def run_final(args):
+    model_dir = Path(args.model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
     train, catalog = load()
     tables = vlib.fit_tables(train, catalog)
     index = vlib.CatalogIndex(catalog, tables)
@@ -698,7 +702,7 @@ def run_final(args):
     cands, feats = vlib.build_matrix(index, rows)
     aug = augment(train, np.random.default_rng(1000), args.aug, args.aug_mode, args.aug_name).to_dict("records")
     sets = model_sets(rows, cands, feats, aug, vlib.build_matrix(index, aug) if aug else ([], []), args.latin_models)
-    for old in MODEL_DIR.glob("ranker*.txt"):
+    for old in model_dir.glob("ranker*.txt"):
         old.unlink()
     views = []
     for rows_for, parts in sets.items():
@@ -706,13 +710,13 @@ def run_final(args):
         for k, drop in enumerate(parse_views(args)):
             name = f"ranker_{k}.txt" if rows_for == "all" else f"ranker_{rows_for[0]}{k}.txt"
             model = train_model(blank(X, drop), y, g, w, rounds=args.rounds, params=dict(PARAMS, objective=args.objective))
-            model.save_model(str(MODEL_DIR / name))
+            model.save_model(str(model_dir / name))
             views.append({"file": name, "drop": drop, "rows": rows_for})
-    with open(MODEL_DIR / "views.json", "w", encoding="utf-8") as fh:
+    with open(model_dir / "views.json", "w", encoding="utf-8") as fh:
         json.dump(views, fh, indent=1)
-    with open(MODEL_DIR / "tables.json", "w", encoding="utf-8") as fh:
+    with open(model_dir / "tables.json", "w", encoding="utf-8") as fh:
         json.dump(tables, fh, ensure_ascii=False)
-    with open(MODEL_DIR / "settings.json", "w", encoding="utf-8") as fh:
+    with open(model_dir / "settings.json", "w", encoding="utf-8") as fh:
         json.dump(vlib.current_settings(), fh, indent=1)
     print(f"saved {len(views)} ranker(s), tables and settings {vlib.current_settings()}")
 
@@ -736,6 +740,7 @@ if __name__ == "__main__":
                     help="the same for the non-Hangul validation rows")
     ap.add_argument("--latin-cap", type=int, default=0, help="Latin stress rows per fold (0 = all)")
     ap.add_argument("--tag", default="", help="prefix for the OOF file name")
+    ap.add_argument("--model-dir", default=str(MODEL_DIR), help="where --final writes the rankers, tables and settings")
     ap.add_argument("--dump-stress", action="store_true", help="also write work/stress_<tag><seed>.csv, one line per stressed row")
     ap.add_argument("--threads", type=int, default=PARAMS["num_threads"])
     ap.add_argument("--views", nargs="+", default=VIEWS,
@@ -765,10 +770,15 @@ if __name__ == "__main__":
     ap.add_argument("--noisy-hangul", type=int, default=NOISY_HANGUL, help="heavy-spelling/loose-tonnage copies per Hangul row")
     ap.add_argument("--noisy-latin", type=float, default=NOISY_LATIN_FRAC,
                     help="share of Latin rows with a heavy-spelling/loose-tonnage copy")
+    ap.add_argument("--hangul-gen", type=float, default=0.0,
+                    help="weight of the train noise generator's edits (lgen2-4: a character doubled, neighbours "
+                         "swapped or one left out) added to the Hangul spelling mix of the noisy copies")
     ap.add_argument("--noisy-name", default=NOISY_NAME, choices=["spell", "word", "both"],
                     help="name damage in the noisy copies: letter/syllable edits, words left out, or both")
     ap.add_argument("--noisy-tonnage", default=",".join(f"{m}:{w}" for m, w in TONNAGE_NOISY),
                     help="tonnage damage mixture of the noisy copies, e.g. keep:0.35,u10:0.3,u20:0.35")
+    ap.add_argument("--noisy-tonnage-hangul", default="",
+                    help="tonnage mixture for the Hangul copies only, same format (default: --noisy-tonnage)")
     ap.add_argument("--noisy-fields", default=",".join(f"{m}:{w}" for m, w in FIELDS_NOISY),
                     help="vessel type/flag damage of the noisy copies, e.g. keep:0.8,badtype:0.1,notype:0.1")
     ap.add_argument("--latin-wide", action=argparse.BooleanOptionalAction, default=vlib.LATIN_WIDE,
@@ -783,6 +793,10 @@ if __name__ == "__main__":
     ap.add_argument("--hangul-outer", type=float, default=vlib.HANGUL_OUTER,
                     help="wider tonnage window for a few more Hangul candidates (tonnage far off)")
     ap.add_argument("--hangul-outer-n", type=int, default=vlib.HANGUL_OUTER_N, help="best name matches kept from it")
+    ap.add_argument("--hangul-dedup", action=argparse.BooleanOptionalAction, default=vlib.HANGUL_DEDUP,
+                    help="also match Hangul names with doubled characters collapsed (흥흥아영 -> 흥아영)")
+    ap.add_argument("--hangul-swap", action=argparse.BooleanOptionalAction, default=vlib.HANGUL_SWAP,
+                    help="also match Hangul names with two neighbouring syllables swapped (먼샤 -> 샤먼)")
     ap.add_argument("--aug-noigt", type=float, default=NOIGT_FRAC,
                     help="share of Hangul rows copied with the international tonnage blank")
     a = ap.parse_args()
@@ -803,7 +817,11 @@ if __name__ == "__main__":
     NOISY_HANGUL = a.noisy_hangul
     NOISY_LATIN_FRAC = a.noisy_latin
     NOISY_NAME = a.noisy_name
+    if a.hangul_gen:
+        NOISY_MIXES["hangul"]["spell"] = NOISY_MIXES["hangul"]["spell"] + [(m, a.hangul_gen / 3, False) for m in ("lgen2", "lgen3", "lgen4")]
     TONNAGE_NOISY = [(m, float(w)) for m, w in (part.split(":") for part in a.noisy_tonnage.split(","))]
+    if a.noisy_tonnage_hangul:
+        TONNAGE_NOISY_HANGUL = [(m, float(w)) for m, w in (part.split(":") for part in a.noisy_tonnage_hangul.split(","))]
     FIELDS_NOISY = [(m, float(w)) for m, w in (part.split(":") for part in a.noisy_fields.split(","))]
     vlib.LATIN_WIDE = a.latin_wide
     vlib.LATIN_TON_WIN = a.latin_ton_win
@@ -813,6 +831,8 @@ if __name__ == "__main__":
     vlib.HANGUL_PARTIAL_EXTRA = a.hangul_partial
     vlib.HANGUL_OUTER = a.hangul_outer
     vlib.HANGUL_OUTER_N = a.hangul_outer_n
+    vlib.HANGUL_DEDUP = a.hangul_dedup
+    vlib.HANGUL_SWAP = a.hangul_swap
     if a.cv:
         run_cv(a)
     if a.final:

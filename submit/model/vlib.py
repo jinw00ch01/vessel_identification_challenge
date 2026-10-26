@@ -371,8 +371,32 @@ def dictionary_part(tables: dict, tok: str, exclude: str | None) -> str | None:
     return best
 
 
+RUN_RE = re.compile(r"(.)\1+")
+
+
 def korean_variants(name: str, tables: dict | None = None, exclude: str | None = None):
-    """Whole-name phonetic keys for a Hangul ship name plus token-level info."""
+    """Whole-name phonetic keys for a Hangul ship name plus token-level info; with HANGUL_DEDUP also the
+    keys of the name with doubled characters collapsed, and its numbers when they differ (alt_numbers)."""
+    out = _korean_variants(name, tables, exclude)
+    out["alt_numbers"] = None
+    if HANGUL_DEDUP:
+        collapsed = RUN_RE.sub(r"\1", name)
+        if collapsed != name:
+            alt = _korean_variants(collapsed, tables, exclude)
+            out["keys"] = list(dict.fromkeys(out["keys"] + alt["keys"]))
+            if alt["numbers"] != out["numbers"]:
+                out["alt_numbers"] = alt["numbers"]
+    if HANGUL_SWAP:
+        chars, extra = list(name), []
+        for k in range(min(len(chars), 16) - 1):
+            if HANGUL_RE.match(chars[k]) and HANGUL_RE.match(chars[k + 1]) and chars[k] != chars[k + 1]:
+                swapped = "".join(chars[:k] + [chars[k + 1], chars[k]] + chars[k + 2:])
+                extra += _korean_variants(swapped, tables, exclude)["keys"][:2]
+        out["keys"] = list(dict.fromkeys(out["keys"] + extra))
+    return out
+
+
+def _korean_variants(name: str, tables: dict | None = None, exclude: str | None = None):
     words, numbers = korean_tokens(name)
     readings = [token_readings(t) for t in words]
     variants = []
@@ -518,13 +542,14 @@ def _rank_asc(values: np.ndarray) -> np.ndarray:
     return _rank_desc(-values)
 
 
-def _num_state(qnums: tuple, cnums: tuple) -> int:
+def _num_state(qnums: tuple, cnums: tuple, alt: tuple | None = None) -> int:
     if not qnums and not cnums:
         return 0
     if qnums == cnums:
         return 1
     if qnums and cnums:
-        return 2
+        # 5: the numbers agree once doubled digits are collapsed (제22 for 제2)
+        return 5 if alt is not None and alt == cnums else 2
     return 3 if qnums else 4
 
 
@@ -557,12 +582,18 @@ HANGUL_PARTIAL_EXTRA = 0
 # ... plus the HANGUL_OUTER_N best name matches between that window and a wider one (tonnage far off)
 HANGUL_OUTER = 0.0
 HANGUL_OUTER_N = 0
+# Hangul records with doubled characters (흥흥아영, 제22흥아): also match the name with every run of one
+# character collapsed, and count numbers that agree after collapsing as a separate kind of agreement
+HANGUL_DEDUP = False
+# ... and with each pair of neighbouring syllables swapped (먼샤 for 샤먼), first two keys of each
+HANGUL_SWAP = False
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
-            "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N")
+            "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
+            "HANGUL_SWAP")
 
 
 def current_settings() -> dict:
@@ -773,8 +804,9 @@ class CatalogIndex:
                 s2 = process.cdist([consonants(key)], pc, scorer=Levenshtein.normalized_similarity,
                                    dtype=np.float32)[0]
                 best = np.maximum(best, s1 + s2)
-        qn = kv["numbers"]
-        bonus = np.array([0.15 if (qn and self.nums[i] == qn) else (-0.15 if qn and self.nums[i] and self.nums[i] != qn else 0.0)
+        qn, alt = kv["numbers"], kv.get("alt_numbers")
+        bonus = np.array([0.15 if (qn and self.nums[i] == qn) else 0.1 if (alt and self.nums[i] == alt) else
+                          (-0.15 if qn and self.nums[i] and self.nums[i] != qn else 0.0)
                           for i in cand], dtype=np.float32)
         bonus += 0.3 * self.acronym_hits(kv["acros"], cand)
         # name evidence only: tonnage has its own features, and evaluation tonnage may be off
@@ -925,7 +957,8 @@ class CatalogIndex:
         F[:, COL["name_count"]] = self.name_count[cand]
         F[:, COL["cand_tokens"]] = self.ntok[cand]
         qnums = info["kv"]["numbers"] if info["korean"] else numbers_of(strip_prefix(name))
-        F[:, COL["num_state"]] = [_num_state(qnums, self.nums[i]) for i in cand]
+        alt = info["kv"].get("alt_numbers") if info["korean"] else None
+        F[:, COL["num_state"]] = [_num_state(qnums, self.nums[i], alt) for i in cand]
         if info["korean"]:
             self._korean_features(F, cand, info)
         else:
