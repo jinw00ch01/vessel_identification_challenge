@@ -14,6 +14,7 @@ one part of the test set:
     hangul_nameonly the same for Hangul rows
     latin_exact  Latin rows whose name is exactly a catalog name and whose prediction carries that name
     hangul_tonexact / latin_tonexact  rows whose recorded tonnage equals the predicted vessel's tonnage
+    tonexact_exact  hangul_tonexact for the Hangul rows and latin_exact for the rest, in one submission
 
 and one variant that is a model change rather than a probe:
 
@@ -94,6 +95,20 @@ ANCHORS = {
         "    gts = [(vlib.positive_float(a), vlib.positive_float(b)) for a, b in zip(test[\"gross_tonnage\"], test[\"international_gross_tonnage\"])]\n"
         f"    preds = [p if (not vlib.is_hangul(n) and np.isfinite(cat_gt.get(p, np.nan)) and cat_gt[p] in g) else {DUMMY!r}\n"
         "             for n, g, p in zip(test[\"vessel_name\"], gts, preds)]\n",
+    ),
+    "tonexact_exact": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    # probe: Hangul rows whose tonnage equals the predicted vessel's, and Latin rows whose name is exactly a\n"
+        "    # catalog name carried by the prediction (two counts from one submission)\n"
+        "    cat_gt = dict(zip(catalog[\"vessel_id\"].astype(str), [vlib.positive_float(v) for v in catalog[\"gross_tonnage\"]]))\n"
+        "    gts = [(vlib.positive_float(a), vlib.positive_float(b)) for a, b in zip(test[\"gross_tonnage\"], test[\"international_gross_tonnage\"])]\n"
+        "    cat_an = dict(zip(catalog[\"vessel_id\"].astype(str), [vlib.alnum(vlib.strip_prefix(vlib.upper(v))) for v in catalog[\"vessel_name\"]]))\n"
+        "    known_an = set(cat_an.values())\n"
+        "    q_an = [vlib.alnum(vlib.strip_prefix(vlib.upper(v))) for v in test[\"vessel_name\"]]\n"
+        "    keep = [(np.isfinite(cat_gt.get(p, np.nan)) and cat_gt[p] in g) if vlib.is_hangul(n) else (bool(q) and q in known_an and cat_an.get(p) == q)\n"
+        "            for n, g, q, p in zip(test[\"vessel_name\"], gts, q_an, preds)]\n"
+        f"    preds = [p if k else {DUMMY!r} for k, p in zip(keep, preds)]\n",
     ),
     "nolookup": (
         "    preds = [vlib.lookup_prediction(tables, row) for row in rows]\n",
