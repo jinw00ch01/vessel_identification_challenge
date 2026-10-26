@@ -67,7 +67,7 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
         return preds
     index = vlib.CatalogIndex(catalog, tables)
     cands, feats = vlib.build_matrix(index, [rows[k] for k in todo])
-    korean = np.repeat([vlib.is_hangul(rows[k].get("vessel_name")) for k in todo], [len(c) for c in cands])
+    korean = np.repeat([vlib.hangul_text(rows[k].get("vessel_name")) for k in todo], [len(c) for c in cands])
     scores = rank_scores(np.vstack(feats), korean) if sum(len(c) for c in cands) else np.zeros(0)
     offset = 0
     for k, cand in zip(todo, cands):

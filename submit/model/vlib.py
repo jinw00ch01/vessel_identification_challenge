@@ -36,6 +36,14 @@ def is_hangul(value) -> bool:
     return isinstance(value, str) and bool(HANGUL_RE.search(value))
 
 
+JAMO_RE = re.compile("[\u1100-\u11ff]")
+
+
+def hangul_text(value) -> bool:
+    """Hangul syllables, or with JAMO_KEYS also loose jamo, in a name or word: read it as Hangul."""
+    return isinstance(value, str) and bool(HANGUL_RE.search(value) or (JAMO_KEYS and JAMO_RE.search(value)))
+
+
 def upper(value) -> str:
     if not isinstance(value, str):
         return ""
@@ -259,29 +267,41 @@ KOREAN_NUMBER_WORDS = {"원": "1", "투": "2", "쓰리": "3", "포": "4", "파�
 
 
 def _syllables(text: str):
+    """(initial, medial, final) indices per syllable; with JAMO_KEYS also one triple per loose jamo
+    (a damaged record such as 그ᅳ랜드 or 에ᅵᄋ스), its missing parts -1 (final 0)."""
     for ch in text:
         code = ord(ch) - 0xAC00
         if 0 <= code < 11172:
             cho, rest = divmod(code, 588)
             jung, jong = divmod(rest, 28)
             yield cho, jung, jong
+        elif JAMO_KEYS:
+            o = ord(ch)
+            if 0x1100 <= o <= 0x1112:
+                yield o - 0x1100, -1, 0
+            elif 0x1161 <= o <= 0x1175:
+                yield -1, o - 0x1161, 0
+            elif 0x11A8 <= o <= 0x11C2:
+                yield -1, -1, o - 0x11A7
 
 
 def hangul_key(text: str, eo: str = "O") -> str:
     """Coarse key; eo='A' reads ㅓ as an unstressed English vowel (얼라이언스 -> ALLIANCE)."""
-    return collapse("".join(CHO_CLS[c] + (eo if v == 4 else JUNG_CLS[v]) + JONG_CLS[j]
-                            for c, v, j in _syllables(text)))
+    return collapse("".join((CHO_CLS[c] if c >= 0 else "") + (eo if v == 4 else JUNG_CLS[v] if v >= 0 else "")
+                            + JONG_CLS[j] for c, v, j in _syllables(text)))
 
 
 def romanize(text: str) -> str:
-    return "".join(RR_CHO[c] + RR_JUNG[v] + RR_JONG[j] for c, v, j in _syllables(text))
+    return "".join((RR_CHO[c] if c >= 0 else "") + (RR_JUNG[v] if v >= 0 else "") + RR_JONG[j]
+                   for c, v, j in _syllables(text))
 
 
 def romanized_key(text: str) -> str:
     """Phonetic key of the romanized form; final ㅇ is a plain nasal, ㄱ is hard."""
     parts = []
     for c, v, j in _syllables(text):
-        parts.append(("K" if c == 0 else RR_CHO[c]) + RR_JUNG[v] + ("N" if j == 21 else RR_JONG[j]))
+        parts.append(("K" if c == 0 else RR_CHO[c] if c > 0 else "") + (RR_JUNG[v] if v >= 0 else "")
+                     + ("N" if j == 21 else RR_JONG[j]))
     return english_key("".join(parts))
 
 
@@ -343,7 +363,7 @@ def korean_tokens(name: str) -> tuple[list[str], tuple[str, ...]]:
 
 def token_readings(tok: str) -> list[str]:
     """Phonetic keys a single token may correspond to."""
-    if not HANGUL_RE.search(tok):
+    if not hangul_text(tok):
         return [english_key(tok)]
     out = [hangul_key(tok), romanized_key(tok)]
     acro = spell_acronym(tok)
@@ -406,7 +426,7 @@ def _korean_variants(name: str, tables: dict | None = None, exclude: str | None 
     # mixed: best of acronym reading for letter-name tokens, plain for the rest
     variants.append(collapse("".join(r[-1] if spell_acronym(w) else r[0] for w, r in zip(words, readings))))
     # schwa: ㅓ written for an unstressed English vowel
-    schwa = [hangul_key(w, eo="A") if HANGUL_RE.search(w) else r[0] for w, r in zip(words, readings)]
+    schwa = [hangul_key(w, eo="A") if hangul_text(w) else r[0] for w, r in zip(words, readings)]
     variants.append(collapse("".join(schwa)))
     for s, r in zip(schwa, readings):
         if s not in r:
@@ -415,7 +435,7 @@ def _korean_variants(name: str, tables: dict | None = None, exclude: str | None 
     if tables is not None:
         mapped = []
         for w, r in zip(words, readings):
-            eng = dictionary_part(tables, w, exclude) if HANGUL_RE.search(w) else None
+            eng = dictionary_part(tables, w, exclude) if hangul_text(w) else None
             dict_parts.append(eng)
             mapped.append(english_key(eng) if eng else r[0])
         if any(dict_parts):
@@ -587,13 +607,16 @@ HANGUL_OUTER_N = 0
 HANGUL_DEDUP = False
 # ... and with each pair of neighbouring syllables swapped (먼샤 for 샤먼), first two keys of each
 HANGUL_SWAP = False
+# loose jamo in a record (a typo at the jamo level that no longer composes, 그ᅳ랜드): read each jamo with its
+# sound class instead of dropping it, so a doubled jamo collapses away and a swapped or lost one costs one edit
+JAMO_KEYS = False
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
             "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
-            "HANGUL_SWAP")
+            "HANGUL_SWAP", "JAMO_KEYS")
 
 
 def current_settings() -> dict:
@@ -911,7 +934,7 @@ class CatalogIndex:
         name = upper(row.get("vessel_name"))
         gt = positive_float(row.get("gross_tonnage"))
         igt = positive_float(row.get("international_gross_tonnage"))
-        if is_hangul(name):
+        if hangul_text(name):
             exclude = row.get("target_vessel_id") if isinstance(row.get("target_vessel_id"), str) else None
             kv = korean_variants(name, self.tables, exclude)
             cand, pre = self.korean_candidates(kv, gt, igt, limit=HANGUL_LIMIT)
@@ -1039,7 +1062,7 @@ class CatalogIndex:
         F[:, COL["k_rsim_rank"]] = _rank_desc(rsim)
         F[:, COL["k_vsim"]] = vsim
         F[:, COL["k_vsim_rank"]] = _rank_desc(vsim)
-        rr = kr_key("".join(romanize(w) if HANGUL_RE.search(w) else w for w in kv["words"]))
+        rr = kr_key("".join(romanize(w) if hangul_text(w) else w for w in kv["words"]))
         krsim = process.cdist([rr], [self.krk[i] for i in cand], scorer=Levenshtein.normalized_similarity,
                               dtype=np.float32)[0]
         F[:, COL["k_krsim"]] = krsim

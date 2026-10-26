@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import random
 import shutil
 import subprocess
 import sys
@@ -89,6 +90,24 @@ def smoke(zip_path: Path, n_rows: int = 3000) -> None:
     kor = sample[sample["vessel_name"].map(vlib_is_hangul)].head(200).assign(call_sign="CS_UNSEEN")
     kor["vessel_name"] = kor["vessel_name"].map(lambda v: unicodedata.normalize("NFD", v))
     run_box(zip_path, kor, "nfd")
+    # jamo-level typos that no longer compose (그ᅳ랜드): the run must not stop, and with JAMO_KEYS the score stays high
+    rng = random.Random(3)
+    jam = sample[sample["vessel_name"].map(vlib_is_hangul)].head(200).assign(call_sign="CS_UNSEEN")
+    jam["vessel_name"] = [jamo_typos(v, rng, 2) for v in jam["vessel_name"]]
+    run_box(zip_path, jam, "jamo")
+
+
+def jamo_typos(name: str, rng: random.Random, k: int) -> str:
+    s = unicodedata.normalize("NFD", name)
+    for _ in range(k):
+        i, op = rng.randrange(max(len(s) - 1, 1)), rng.randrange(3)
+        if op == 0:
+            s = s[:i] + s[i] + s[i:]
+        elif op == 1 and i + 1 < len(s):
+            s = s[:i] + s[i + 1] + s[i] + s[i + 2:]
+        elif len(s) > 3:
+            s = s[:i] + s[i + 1:]
+    return unicodedata.normalize("NFC", s)
 
 
 def vlib_is_hangul(value) -> bool:

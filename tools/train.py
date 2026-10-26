@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import sys
 import time
+import unicodedata
 
 import lightgbm as lgb
 import numpy as np
@@ -226,7 +227,8 @@ _JUNG_SWAP = {1: 5, 5: 1, 4: 8, 8: 4, 6: 12, 12: 6}            # ㅐ/ㅔ, ㅓ/�
 _CHO_SWAP = {0: 15, 15: 0, 3: 16, 16: 3, 7: 17, 17: 7, 9: 10, 10: 9, 12: 14, 14: 12}  # ㄱ/ㅋ ㄷ/ㅌ ㅂ/ㅍ ㅅ/ㅆ ㅈ/ㅊ
 NAME_MODES = ("spell", "spell3", "dropsyl", "nospace", "dropword", "dropfirst", "droplast", "initial", "trunc",
               "randname", "garbage", "lspell2", "lspell4", "lgarbage",
-              "lgen2", "lgen3", "lgen4", "wordswap", "hsyl2", "hsyl3", "addtoken", "hspell2", "hspell3")
+              "lgen2", "lgen3", "lgen4", "wordswap", "hsyl2", "hsyl3", "addtoken", "hspell2", "hspell3",
+              "jgen1", "jgen2", "jgen3", "jgen4")
 
 
 def perturb_name(df, rng, mode):
@@ -307,6 +309,20 @@ def perturb_name(df, rng, mode):
                     name = name[:i] + name[i + 1] + name[i] + name[i + 2:]
                 elif len(name) > 3:
                     name = name[:i] + name[i + 1:]
+        elif mode in ("jgen1", "jgen2", "jgen3", "jgen4"):
+            # the generator's edits applied to the jamo of a Hangul name (a jamo doubled, two neighbours
+            # swapped or one left out), recomposed where it still composes: 그랜드 -> 그ᅳ랜드, 에이스 -> 에ᅵᄋ스
+            name = unicodedata.normalize("NFD", name)
+            for _ in range(int(mode[-1])):
+                i = int(rng.integers(max(len(name) - 1, 1)))
+                op = int(rng.integers(3))
+                if op == 0:
+                    name = name[:i] + name[i] + name[i:]
+                elif op == 1 and i + 1 < len(name):
+                    name = name[:i] + name[i + 1] + name[i] + name[i + 2:]
+                elif len(name) > 3:
+                    name = name[:i] + name[i + 1:]
+            name = unicodedata.normalize("NFC", name)
         elif mode == "wordswap":
             # word order reversed (COURAGE GLOVIS, 커리지 글로비스)
             words = name.split()
@@ -770,6 +786,10 @@ if __name__ == "__main__":
     ap.add_argument("--noisy-hangul", type=int, default=NOISY_HANGUL, help="heavy-spelling/loose-tonnage copies per Hangul row")
     ap.add_argument("--noisy-latin", type=float, default=NOISY_LATIN_FRAC,
                     help="share of Latin rows with a heavy-spelling/loose-tonnage copy")
+    ap.add_argument("--hangul-jamo", type=float, default=0.0,
+                    help="weight of jamo-level generator edits (jgen2, jgen3) added to the Hangul spelling mixture")
+    ap.add_argument("--jamo-keys", action=argparse.BooleanOptionalAction, default=vlib.JAMO_KEYS,
+                    help="read loose jamo of a damaged Hangul record by sound instead of dropping them")
     ap.add_argument("--hangul-gen", type=float, default=0.0,
                     help="weight of the train noise generator's edits (lgen2-4: a character doubled, neighbours "
                          "swapped or one left out) added to the Hangul spelling mix of the noisy copies")
@@ -817,6 +837,9 @@ if __name__ == "__main__":
     NOISY_HANGUL = a.noisy_hangul
     NOISY_LATIN_FRAC = a.noisy_latin
     NOISY_NAME = a.noisy_name
+    if a.hangul_jamo:
+        NOISY_MIXES["hangul"]["spell"] = NOISY_MIXES["hangul"]["spell"] + [(m, a.hangul_jamo / 2, False) for m in ("jgen2", "jgen3")]
+    vlib.JAMO_KEYS = a.jamo_keys
     if a.hangul_gen:
         NOISY_MIXES["hangul"]["spell"] = NOISY_MIXES["hangul"]["spell"] + [(m, a.hangul_gen / 3, False) for m in ("lgen2", "lgen3", "lgen4")]
     TONNAGE_NOISY = [(m, float(w)) for m, w in (part.split(":") for part in a.noisy_tonnage.split(","))]
