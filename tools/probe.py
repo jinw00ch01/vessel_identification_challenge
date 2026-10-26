@@ -15,6 +15,8 @@ one part of the test set:
     latin_exact  Latin rows whose name is exactly a catalog name and whose prediction carries that name
     hangul_tonexact / latin_tonexact  rows whose recorded tonnage equals the predicted vessel's tonnage
     tonexact_exact  hangul_tonexact for the Hangul rows and latin_exact for the rest, in one submission
+    rank2        every ranked row gets the ranker's second choice (rows with one candidate get the dummy):
+                 counts the misses whose target was runner-up, for Hangul and Latin in one submission
 
 and one variant that is a model change rather than a probe:
 
@@ -109,6 +111,11 @@ ANCHORS = {
         "    keep = [(np.isfinite(cat_gt.get(p, np.nan)) and cat_gt[p] in g) if vlib.is_hangul(n) else (bool(q) and q in known_an and cat_an.get(p) == q)\n"
         "            for n, g, q, p in zip(test[\"vessel_name\"], gts, q_an, preds)]\n"
         f"    preds = [p if k else {DUMMY!r} for k, p in zip(keep, preds)]\n",
+    ),
+    "rank2": (
+        "        preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]\n",
+        "        order = np.argsort(-local, kind=\"stable\")  # probe: runner-up (order[0] is the argmax)\n"
+        f"        preds[k] = index.ids[cand[int(order[1])]] if len(cand) > 1 else {DUMMY!r}\n",
     ),
     "nolookup": (
         "    preds = [vlib.lookup_prediction(tables, row) for row in rows]\n",
