@@ -91,7 +91,9 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
             if len(cand):
                 j = int(np.argmax(local))
                 loose = bool(vlib.LOOSE_RE.search(rows[k]["vessel_name"]))  # letters left out of any syllable
-                if vlib.ime_accept(vlib.alnum(vlib.strip_prefix(vlib.upper(row["vessel_name"]))), F[j], loose):
+                top = best.get(k, (None, -np.inf))[1]  # the Hangul reading's top score
+                if vlib.ime_accept(vlib.alnum(vlib.strip_prefix(vlib.upper(row["vessel_name"]))), F[j], loose,
+                                   float(local[j]), float(local[j]) - top):
                     preds[k] = index.ids[cand[j]]
     if vlib.IME_ENCODE:
         # a Hangul name typed with the English layout left on (RMFFHQLTM TJS = 글로비스 선): read the Hangul it types

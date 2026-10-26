@@ -518,17 +518,24 @@ def ime_typed(text: str) -> str:
     return "".join(out)
 
 
-def ime_accept(query_an: str, f: np.ndarray, loose: bool) -> bool:
-    """Keep the keyboard reading of a record when it reads like English (a fifth or more of its letters vowels;
-    real Hangul names read as keys have almost none) and its best match spells nearly the same name at a
-    compatible tonnage: one edit per four letters, or per two and a half when some letters compose into no
-    syllable (loose jamo: 99% of such typed names have one, real Hangul names none); exact under five letters."""
+def ime_accept(query_an: str, f: np.ndarray, loose: bool, score: float = -math.inf, margin: float = -math.inf) -> bool:
+    """Keep the keyboard reading of a record when its best match has a compatible tonnage and either it reads like
+    English (15% or more of its letters vowels; real Hangul names read as keys have almost none) and spells nearly
+    the same name: one edit per four letters, or per two and a half when some letters compose into no syllable
+    (loose jamo: 99% of such typed names have one, real Hangul names none), exact under five letters; or, with
+    IME_MARGIN, the Latin rankers are sure of it (`score`, their top score, above 0.5) and surer than the Hangul
+    rankers of the Hangul reading's pick (`margin`, top score minus top score, above 1, or 2 under four letters,
+    which match by chance more easily), which also takes typed names with typos or a word left out."""
+    ton = f[COL["min_alr"]]
+    if math.isfinite(ton) and ton > 0.3:
+        return False
+    if IME_MARGIN and score > 0.5 and margin > (1 if len(query_an) >= 4 else 2):
+        return True
     letters = [c for c in query_an if "A" <= c <= "Z"]
     if len(query_an) < 4 or not math.isfinite(f[COL["e_osa"]]) or sum(c in "AEIOU" for c in letters) < 0.15 * len(letters):
         return False
     allowed = 0 if len(query_an) < 5 else math.floor(len(query_an) * (0.4 if loose else 0.25))
-    ton = f[COL["min_alr"]]
-    return bool((not math.isfinite(ton) or ton <= 0.3) and f[COL["e_osa"]] <= allowed)
+    return bool(f[COL["e_osa"]] <= allowed)
 
 
 def ime_encode_accept(latin_off: float, margin: float, f: np.ndarray) -> bool:
@@ -774,8 +781,10 @@ JAMO_REPAIR = False
 # a Latin name typed with the Korean keyboard layout still on (GLOVIS SUN -> 히ㅐ퍈 녀ㅜ): script.py also reads such
 # a record as the keys that typed it and takes that reading's best match when it spells a catalog name
 IME_DECODE = False
-# ... and the other way: a Hangul name typed with the English layout on (RMFFHQLTM TJS -> 글로비스 선), read as the
-# Hangul it types when that composes cleanly and matches far better than the Latin reading
+# ... also when the Latin rankers are surer of that reading than the Hangul rankers of theirs (see ime_accept)
+IME_MARGIN = False
+# the reverse of IME_DECODE: a Hangul name typed with the English layout on (RMFFHQLTM TJS -> 글로비스 선), read as
+# the Hangul it types when that composes cleanly and matches far better than the Latin reading
 IME_ENCODE = False
 
 
@@ -783,7 +792,7 @@ IME_ENCODE = False
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
             "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
-            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE", "IME_ENCODE")
+            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE", "IME_MARGIN", "IME_ENCODE")
 
 
 def current_settings() -> dict:
