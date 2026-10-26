@@ -17,6 +17,10 @@ one part of the test set:
     tonexact_exact  hangul_tonexact for the Hangul rows and latin_exact for the rest, in one submission
     rank2        every ranked row gets the ranker's second choice (rows with one candidate get the dummy):
                  counts the misses whose target was runner-up, for Hangul and Latin in one submission
+    notonnage_fix  each row is also predicted with both tonnage fields blank; that prediction is kept where it
+                 differs from the full one, the dummy elsewhere: counts the misses that blanking the recorded
+                 tonnage would fix (high = the record's tonnage misleads the ranker), Hangul and Latin at once
+    hangul_tonexact_only  hangul_tonexact with every Latin row given the dummy: one count, no alias
 
 and one variant that is a model change rather than a probe:
 
@@ -116,6 +120,24 @@ ANCHORS = {
         "        preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]\n",
         "        order = np.argsort(-local, kind=\"stable\")  # probe: runner-up (order[0] is the argmax)\n"
         f"        preds[k] = index.ids[cand[int(order[1])]] if len(cand) > 1 else {DUMMY!r}\n",
+    ),
+    "notonnage_fix": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    # probe: the prediction without the recorded tonnage, where it differs from the full one\n"
+        "    blank = test.copy()\n"
+        "    blank[[\"gross_tonnage\", \"international_gross_tonnage\"]] = np.nan\n"
+        "    alt = predict(blank, catalog)\n"
+        f"    preds = [q if q != p else {DUMMY!r} for p, q in zip(preds, alt)]\n",
+    ),
+    "hangul_tonexact_only": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    # probe: only Hangul rows whose gross or international tonnage equals the predicted vessel's tonnage\n"
+        "    cat_gt = dict(zip(catalog[\"vessel_id\"].astype(str), [vlib.positive_float(v) for v in catalog[\"gross_tonnage\"]]))\n"
+        "    gts = [(vlib.positive_float(a), vlib.positive_float(b)) for a, b in zip(test[\"gross_tonnage\"], test[\"international_gross_tonnage\"])]\n"
+        f"    preds = [p if (vlib.is_hangul(n) and np.isfinite(cat_gt.get(p, np.nan)) and cat_gt[p] in g) else {DUMMY!r}\n"
+        "             for n, g, p in zip(test[\"vessel_name\"], gts, preds)]\n",
     ),
     "nolookup": (
         "    preds = [vlib.lookup_prediction(tables, row) for row in rows]\n",

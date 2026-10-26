@@ -394,10 +394,58 @@ def dictionary_part(tables: dict, tok: str, exclude: str | None) -> str | None:
 RUN_RE = re.compile(r"(.)\1+")
 
 
+def _loose(text: str) -> int:
+    return len(JAMO_RE.findall(unicodedata.normalize("NFC", text)))
+
+
+def repair_jamo(name: str, depth: int = 3, beam: int = 6, keep: int = 3) -> list[str]:
+    """Names a jamo-level typo may have come from: up to `depth` jamo left out or neighbours swapped back
+    (a doubled jamo's copy is the cheapest to drop) until every jamo composes again, fewest edits first."""
+    start = unicodedata.normalize("NFD", name)
+    if not _loose(start):
+        return []
+    frontier, seen, done = [(0.0, start)], {start}, []
+    for _ in range(depth):
+        nxt = []
+        for cost, s in frontier:
+            for i in range(len(s)):
+                if JAMO_RE.match(s[i]):
+                    twin = (i > 0 and s[i - 1] == s[i]) or (i + 1 < len(s) and s[i + 1] == s[i])
+                    nxt.append((cost + (0.5 if twin else 1.0), s[:i] + s[i + 1:]))
+                if i + 1 < len(s) and s[i] != s[i + 1] and (JAMO_RE.match(s[i]) or JAMO_RE.match(s[i + 1])):
+                    nxt.append((cost + 1.0, s[:i] + s[i + 1] + s[i] + s[i + 2:]))
+        scored = []
+        for cost, s in nxt:
+            if s not in seen:
+                seen.add(s)
+                scored.append((_loose(s), cost, s))
+        scored.sort(key=lambda x: (x[0], x[1]))
+        done += [(c, s) for n, c, s in scored if n == 0]
+        frontier = [(c, s) for n, c, s in scored if n > 0][:beam]
+        if len(done) >= keep or not frontier:
+            break
+    done.sort(key=lambda x: x[0])
+    out = []
+    for _, s in done:
+        t = unicodedata.normalize("NFC", s)
+        if t not in out and HANGUL_RE.search(t):
+            out.append(t)
+    return out[:keep]
+
+
 def korean_variants(name: str, tables: dict | None = None, exclude: str | None = None):
     """Whole-name phonetic keys for a Hangul ship name plus token-level info; with HANGUL_DEDUP also the
-    keys of the name with doubled characters collapsed, and its numbers when they differ (alt_numbers)."""
+    keys of the name with doubled characters collapsed, and its numbers when they differ (alt_numbers);
+    with JAMO_REPAIR a record with loose jamo is read as its likeliest repaired spelling, keeping the keys of
+    the record itself and of the other repairs."""
     out = _korean_variants(name, tables, exclude)
+    if JAMO_REPAIR and JAMO_KEYS and JAMO_RE.search(name):
+        fixed = repair_jamo(name)
+        if fixed:
+            main = _korean_variants(fixed[0], tables, exclude)
+            extra = out["keys"] + [k for f in fixed[1:] for k in _korean_variants(f, tables, exclude)["keys"]]
+            main["keys"] = list(dict.fromkeys(main["keys"] + extra))
+            out = main
     out["alt_numbers"] = None
     if HANGUL_DEDUP:
         collapsed = RUN_RE.sub(r"\1", name)
@@ -610,13 +658,16 @@ HANGUL_SWAP = False
 # loose jamo in a record (a typo at the jamo level that no longer composes, 그ᅳ랜드): read each jamo with its
 # sound class instead of dropping it, so a doubled jamo collapses away and a swapped or lost one costs one edit
 JAMO_KEYS = False
+# ... and also read such a record as the spelling it most likely came from (repair_jamo): its words then
+# hit the learned dictionary, letter-name acronyms and numbers again
+JAMO_REPAIR = False
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
             "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
-            "HANGUL_SWAP", "JAMO_KEYS")
+            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR")
 
 
 def current_settings() -> dict:

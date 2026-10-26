@@ -533,6 +533,8 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
     rng_lat = np.random.default_rng(2000 + split_seed)
     sel = lambda idx, seq: [seq[i] for i in idx]  # noqa: E731
     for fold, (tr_idx, va_idx) in enumerate(fold_splits(train, split_seed)):
+        if args.max_folds and fold >= args.max_folds:
+            break
         t0 = time.time()
         index.tables = vlib.fit_tables(train.iloc[tr_idx], catalog)
         k_cands, k_feats = vlib.build_matrix(index, [rows[i] for i in kor_idx])
@@ -628,7 +630,8 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
         if args.verbose:
             m = vlib.weighted_accuracy(train["vessel_name"].iloc[va_idx], train["target_vessel_id"].iloc[va_idx], pred)
             print(f"fold {fold}: {m} ({time.time() - t0:.0f}s)", flush=True)
-    m = vlib.weighted_accuracy(train["vessel_name"], train["target_vessel_id"], oof)
+    done = np.array([o is not None for o in oof])  # every row, or with --max-folds only the folds run
+    m = vlib.weighted_accuracy(train["vessel_name"][done], train["target_vessel_id"][done], oof[done])
     m.update({f"k_{mode}": float(np.mean(v)) for mode, v in stress.items()})
     m.update({f"e_{mode}": float(np.mean(v)) for mode, v in stress_lat.items()})
     m.update({f"{k}_recall": round(float(np.mean(v)), 4) for k, v in s_recall.items()})
@@ -637,11 +640,11 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
         ok = np.array((stress if k.startswith("k_") else stress_lat)[k[2:]], dtype=bool)
         uns = np.array(uns, dtype=bool)
         m[f"{k}_print"] = (round(float((ok & uns).mean()), 3), round(float((ok & ~uns).mean()), 3), round(float((~ok).mean()), 3))
-    for nm, msk in (("k_clean", kor), ("e_clean", ~kor)):
+    for nm, msk in (("k_clean", kor & done), ("e_clean", ~kor & done)):
         ok = (oof == train["target_vessel_id"].to_numpy())[msk]
         uns = (np.nan_to_num(gap, nan=np.inf) < SURE_GAP)[msk]
         m[f"{nm}_print"] = (round(float((ok & uns).mean()), 3), round(float((ok & ~uns).mean()), 3), round(float((~ok).mean()), 3))
-    print(f"split {split_seed}: recall k={recall[kor].mean():.4f} e={recall[~kor].mean():.4f} CV {m}", flush=True)
+    print(f"split {split_seed}: recall k={recall[kor & done].mean():.4f} e={recall[~kor & done].mean():.4f} CV {m}", flush=True)
     WORK.mkdir(exist_ok=True)
     out = train.copy()
     out["pred"] = oof
@@ -756,6 +759,7 @@ if __name__ == "__main__":
                     help="the same for the non-Hangul validation rows")
     ap.add_argument("--latin-cap", type=int, default=0, help="Latin stress rows per fold (0 = all)")
     ap.add_argument("--tag", default="", help="prefix for the OOF file name")
+    ap.add_argument("--max-folds", type=int, default=0, help="stop after this many folds (0 = all five); quick A/B")
     ap.add_argument("--model-dir", default=str(MODEL_DIR), help="where --final writes the rankers, tables and settings")
     ap.add_argument("--dump-stress", action="store_true", help="also write work/stress_<tag><seed>.csv, one line per stressed row")
     ap.add_argument("--threads", type=int, default=PARAMS["num_threads"])
