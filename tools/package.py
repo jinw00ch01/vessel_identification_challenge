@@ -95,6 +95,13 @@ def smoke(zip_path: Path, n_rows: int = 3000) -> None:
     jam = sample[sample["vessel_name"].map(vlib_is_hangul)].head(200).assign(call_sign="CS_UNSEEN")
     jam["vessel_name"] = [jamo_typos(v, rng, 2) for v in jam["vessel_name"]]
     run_box(zip_path, jam, "jamo")
+    # Latin names typed with the Korean layout on (GLOVIS SUN -> 히ㅐ퍈 녀ㅜ): the run must not stop, and with
+    # IME_DECODE the score stays high
+    sys.path.insert(0, str(SUBMIT / "model"))
+    import vlib
+    ime = sample[~sample["vessel_name"].map(vlib_is_hangul)].head(200).assign(call_sign="CS_UNSEEN")
+    ime["vessel_name"] = ime["vessel_name"].map(vlib.ime_typed)
+    run_box(zip_path, ime, "ime")
 
 
 def jamo_typos(name: str, rng: random.Random, k: int) -> str:

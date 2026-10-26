@@ -74,6 +74,22 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
         local = scores[offset: offset + len(cand)]
         offset += len(cand)
         preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]
+    if vlib.IME_DECODE:
+        # a Latin name typed with the Korean layout left on (히ㅐ퍈 = GLOVIS): read it as the keys that typed it
+        alt = [k for k in todo if isinstance(rows[k].get("vessel_name"), str) and vlib.IME_RE.search(rows[k]["vessel_name"])]
+        arows = [dict(rows[k], vessel_name=vlib.ime_keys(vlib.upper(rows[k]["vessel_name"]))) for k in alt]
+        a_cands, a_feats = vlib.build_matrix(index, arows)
+        n = sum(len(c) for c in a_cands)
+        a_scores = rank_scores(np.vstack(a_feats), np.zeros(n, dtype=bool)) if n else np.zeros(0)
+        offset = 0
+        for k, row, cand, F in zip(alt, arows, a_cands, a_feats):
+            local = a_scores[offset: offset + len(cand)]
+            offset += len(cand)
+            if len(cand):
+                j = int(np.argmax(local))
+                loose = bool(vlib.LOOSE_RE.search(rows[k]["vessel_name"]))  # letters left out of any syllable
+                if vlib.ime_accept(vlib.alnum(vlib.strip_prefix(vlib.upper(row["vessel_name"]))), F[j], loose):
+                    preds[k] = index.ids[cand[j]]
     return preds
 
 

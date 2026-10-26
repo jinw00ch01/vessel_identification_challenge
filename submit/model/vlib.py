@@ -433,6 +433,104 @@ def repair_jamo(name: str, depth: int = 3, beam: int = 6, keep: int = 3) -> list
     return out[:keep]
 
 
+# Korean 2-set keyboard: the key under each jamo (shifted keys give the tense consonants and ㅒ ㅖ), compound
+# vowels and finals typed as two keys
+_CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
+_JUNG = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ"
+_JONG = ("", "ㄱ", "ㄲ", "ㄳ", "ㄴ", "ㄵ", "ㄶ", "ㄷ", "ㄹ", "ㄺ", "ㄻ", "ㄼ", "ㄽ", "ㄾ", "ㄿ", "ㅀ", "ㅁ", "ㅂ", "ㅄ",
+         "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ")
+_IME_KEY = dict(zip("ㅂㅈㄷㄱㅅㅛㅕㅑㅐㅔㅁㄴㅇㄹㅎㅗㅓㅏㅣㅋㅌㅊㅍㅠㅜㅡㅃㅉㄸㄲㅆㅒㅖ", "QWERTYUIOPASDFGHJKLZXCVBNMQWERTOP"))
+_IME_KEY.update({"ㅘ": "HK", "ㅙ": "HO", "ㅚ": "HL", "ㅝ": "NJ", "ㅞ": "NP", "ㅟ": "NL", "ㅢ": "ML", "ㄳ": "RT",
+                 "ㄵ": "SW", "ㄶ": "SG", "ㄺ": "FR", "ㄻ": "FA", "ㄼ": "FQ", "ㄽ": "FT", "ㄾ": "FX", "ㄿ": "FV", "ㅀ": "FG",
+                 "ㅄ": "QT", "": ""})
+# conjoining jamo (what NFKC makes of the compatibility letters) back to the compatibility letters
+_IME_CONJ = {**{chr(0x1100 + i): c for i, c in enumerate(_CHO)}, **{chr(0x1161 + i): c for i, c in enumerate(_JUNG)},
+             **{chr(0x11A7 + i): c for i, c in enumerate(_JONG) if i}}
+IME_RE = re.compile("[가-힣\u1100-\u11ff\u3131-\u318e]")
+LOOSE_RE = re.compile("[\u1100-\u11ff\u3131-\u318e]")
+
+
+def ime_keys(name: str) -> str:
+    """The keys that type `name` on the Korean 2-set keyboard (히ㅐ퍈 녀ㅜ -> GLOVIS SUN); other characters stay."""
+    out = []
+    for ch in name:
+        o = ord(ch)
+        if 0xAC00 <= o <= 0xD7A3:
+            s = o - 0xAC00
+            out.append(_IME_KEY[_CHO[s // 588]] + _IME_KEY[_JUNG[s % 588 // 28]] + _IME_KEY[_JONG[s % 28]])
+        else:
+            c = _IME_CONJ.get(ch, ch)
+            out.append(_IME_KEY.get(c, c))
+    return "".join(out)
+
+
+_IME_JAMO = {v: k for k, v in _IME_KEY.items() if len(v) == 1 and k not in "ㅃㅉㄸㄲㅆㅒㅖ"}
+_IME_PAIRS = {v: k for k, v in _IME_KEY.items() if len(v) == 2}  # "HK" -> ㅘ, "RT" -> ㄳ
+
+
+def _ime_pair(jamo: str, key: str, pool) -> str | None:
+    """The compound vowel or final that `jamo` followed by `key` makes (ㅗ + K -> ㅘ), if it is in `pool`."""
+    x = _IME_PAIRS.get(_IME_KEY[jamo] + key) if len(_IME_KEY[jamo]) == 1 else None
+    return x if x is not None and x in pool else None
+
+
+def ime_typed(text: str) -> str:
+    """What a 2-set Korean IME composes when `text` is typed with the Hangul layout on (GLOVIS SUN -> 히ㅐ퍈 녀ㅜ),
+    the inverse of ime_keys; for stress tests."""
+    out, syl = [], []  # syl: the jamo of the syllable being composed, as [cho, jung, jong] (None = empty)
+
+    def flush():
+        if syl:
+            cho, jung, jong = syl
+            if cho and jung:
+                out.append(chr(0xAC00 + (_CHO.index(cho) * 21 + _JUNG.index(jung)) * 28 + _JONG.index(jong or "")))
+            else:
+                out.append((cho or "") + (jung or ""))
+            syl.clear()
+
+    for ch in text.upper():
+        j = _IME_JAMO.get(ch)
+        if j is None:
+            flush()
+            out.append(ch)
+        elif j in _JUNG:
+            if syl and syl[2]:  # the final consonant (or its second half) starts the next syllable
+                first, last = (_IME_KEY[syl[2]][0], _IME_KEY[syl[2]][1]) if len(_IME_KEY[syl[2]]) == 2 else (None, _IME_KEY[syl[2]])
+                syl[2] = _IME_JAMO[first] if first else None
+                flush()
+                syl.extend([_IME_JAMO[last], j, None])
+            elif syl and syl[0] and not syl[1]:
+                syl[1] = j
+            elif syl and syl[1] and _ime_pair(syl[1], ch, _JUNG):
+                syl[1] = _ime_pair(syl[1], ch, _JUNG)
+            else:
+                flush()
+                syl.extend([None, j, None])
+        else:
+            if syl and syl[0] and syl[1] and not syl[2] and j in _JONG:
+                syl[2] = j
+            elif syl and syl[2] and _ime_pair(syl[2], ch, _JONG):
+                syl[2] = _ime_pair(syl[2], ch, _JONG)
+            else:
+                flush()
+                syl.extend([j, None, None])
+    flush()
+    return "".join(out)
+
+
+def ime_accept(query_an: str, f: np.ndarray, loose: bool) -> bool:
+    """Keep the keyboard reading of a record when it reads like English (a fifth or more of its letters vowels;
+    real Hangul names read as keys have almost none) and its best match spells nearly the same name at a
+    compatible tonnage: one edit per four letters, or per two and a half when some letters compose into no
+    syllable (loose jamo: 99% of such typed names have one, real Hangul names none); exact under five letters."""
+    letters = [c for c in query_an if "A" <= c <= "Z"]
+    if len(query_an) < 4 or not math.isfinite(f[COL["e_osa"]]) or sum(c in "AEIOU" for c in letters) < 0.15 * len(letters):
+        return False
+    allowed = 0 if len(query_an) < 5 else math.floor(len(query_an) * (0.4 if loose else 0.25))
+    ton = f[COL["min_alr"]]
+    return bool((not math.isfinite(ton) or ton <= 0.3) and f[COL["e_osa"]] <= allowed)
+
+
 def korean_variants(name: str, tables: dict | None = None, exclude: str | None = None):
     """Whole-name phonetic keys for a Hangul ship name plus token-level info; with HANGUL_DEDUP also the
     keys of the name with doubled characters collapsed, and its numbers when they differ (alt_numbers);
@@ -661,13 +759,16 @@ JAMO_KEYS = False
 # ... and also read such a record as the spelling it most likely came from (repair_jamo): its words then
 # hit the learned dictionary, letter-name acronyms and numbers again
 JAMO_REPAIR = False
+# a Latin name typed with the Korean keyboard layout still on (GLOVIS SUN -> 히ㅐ퍈 녀ㅜ): script.py also reads such
+# a record as the keys that typed it and takes that reading's best match when it spells a catalog name
+IME_DECODE = False
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
             "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
-            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR")
+            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE")
 
 
 def current_settings() -> dict:

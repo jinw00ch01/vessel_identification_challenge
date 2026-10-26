@@ -228,7 +228,7 @@ _CHO_SWAP = {0: 15, 15: 0, 3: 16, 16: 3, 7: 17, 17: 7, 9: 10, 10: 9, 12: 14, 14:
 NAME_MODES = ("spell", "spell3", "dropsyl", "nospace", "dropword", "dropfirst", "droplast", "initial", "trunc",
               "randname", "garbage", "lspell2", "lspell4", "lgarbage",
               "lgen2", "lgen3", "lgen4", "wordswap", "hsyl2", "hsyl3", "addtoken", "hspell2", "hspell3",
-              "jgen1", "jgen2", "jgen3", "jgen4")
+              "jgen1", "jgen2", "jgen3", "jgen4", "ime")
 
 
 def perturb_name(df, rng, mode):
@@ -323,6 +323,9 @@ def perturb_name(df, rng, mode):
                 elif len(name) > 3:
                     name = name[:i] + name[i + 1:]
             name = unicodedata.normalize("NFC", name)
+        elif mode == "ime":
+            # a Latin name typed with the Korean keyboard layout left on: GLOVIS SUN -> 히ㅐ퍈 녀ㅜ
+            name = vlib.ime_typed(name)
         elif mode == "wordswap":
             # word order reversed (COURAGE GLOVIS, 커리지 글로비스)
             words = name.split()

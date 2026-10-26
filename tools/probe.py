@@ -21,6 +21,12 @@ one part of the test set:
                  differs from the full one, the dummy elsewhere: counts the misses that blanking the recorded
                  tonnage would fix (high = the record's tonnage misleads the ranker), Hangul and Latin at once
     hangul_tonexact_only  hangul_tonexact with every Latin row given the dummy: one count, no alias
+    hangul_nodouble  Hangul rows whose name has no doubled syllable (흥흥아영) keep their prediction, the others
+                 and every Latin row get the dummy: the base's Hangul count minus this one is the number of
+                 correct rows with a doubled syllable (train: about 1 in 200 names; generator doubling: most)
+    nameonly_tonfix  Hangul rows predicted from the name alone (hangul_nameonly) and Latin rows counted as in
+                 notonnage_fix, from one extra prediction: the Hangul count says whether the evaluation's
+                 Hangul names are as readable as train's (in-sample v10n 0.985 on clean names)
 
 and one variant that is a model change rather than a probe:
 
@@ -138,6 +144,25 @@ ANCHORS = {
         "    gts = [(vlib.positive_float(a), vlib.positive_float(b)) for a, b in zip(test[\"gross_tonnage\"], test[\"international_gross_tonnage\"])]\n"
         f"    preds = [p if (vlib.is_hangul(n) and np.isfinite(cat_gt.get(p, np.nan)) and cat_gt[p] in g) else {DUMMY!r}\n"
         "             for n, g, p in zip(test[\"vessel_name\"], gts, preds)]\n",
+    ),
+    "hangul_nodouble": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    import re  # probe: only Hangul rows without a doubled syllable\n"
+        "    names = [unicodedata.normalize(\"NFC\", v) if isinstance(v, str) else \"\" for v in test[\"vessel_name\"]]\n"
+        f"    preds = [p if (vlib.is_hangul(n) and not re.search(r\"([가-힣])\\1\", m)) else {DUMMY!r}\n"
+        "             for n, m, p in zip(test[\"vessel_name\"], names, preds)]\n",
+    ),
+    "nameonly_tonfix": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    # probe: Hangul rows keep only their name; Latin rows lose their tonnage and count where that changes the pick\n"
+        "    hangul = test[\"vessel_name\"].map(vlib.is_hangul).to_numpy(dtype=bool)\n"
+        "    blank = test.copy()\n"
+        "    blank.loc[hangul, [\"gross_tonnage\", \"international_gross_tonnage\", \"vessel_type\", \"flag_name\"]] = np.nan\n"
+        "    blank.loc[~hangul, [\"gross_tonnage\", \"international_gross_tonnage\"]] = np.nan\n"
+        "    alt = predict(blank, catalog)\n"
+        f"    preds = [q if h else (q if q != p else {DUMMY!r}) for h, p, q in zip(hangul, preds, alt)]\n",
     ),
     "nolookup": (
         "    preds = [vlib.lookup_prediction(tables, row) for row in rows]\n",
