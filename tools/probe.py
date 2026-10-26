@@ -121,6 +121,7 @@ def build(base: Path, mode: str, name: str, gap: float = 2.0) -> Path:
     old, new = ANCHORS[mode]
     new = new.replace("{gap}", repr(gap))
     out = ROOT / "dist" / f"submit_{name}.zip"
+    assert len(out.name) <= 30, f"{out.name}: upload file names are kept to 30 characters"
     out.parent.mkdir(exist_ok=True)
     with zipfile.ZipFile(base) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
         for info in src.infolist():

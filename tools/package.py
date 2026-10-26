@@ -27,7 +27,8 @@ WORK = ROOT / "work"
 def build_zip(name: str) -> Path:
     DIST.mkdir(exist_ok=True)
     path = DIST / f"submit_{name}.zip"
-    files = [SUBMIT / "script.py", SUBMIT / "requirements.txt"]
+    assert len(path.name) <= 30, f"{path.name}: upload file names are kept to 30 characters"
+    files =[SUBMIT / "script.py", SUBMIT / "requirements.txt"]
     files += sorted(p for p in (SUBMIT / "model").rglob("*") if p.is_file() and "__pycache__" not in p.parts)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in files:

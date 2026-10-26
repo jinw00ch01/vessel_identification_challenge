@@ -7,7 +7,7 @@
 - `submit/`은 `submit.zip`에 그대로 들어가는 내용입니다 (`script.py`, `requirements.txt`, `model/`).
   - `submit/model/vlib.py`에 정규화, 후보 검색, 쌍(pair) 특징이 모두 들어 있고, 학습과 추론이 같은 코드를 씁니다.
 - `tools/train.py`는 그룹 교차검증(`--cv --split-seeds 1 2 3`)을 돌리고 최종 랭커를 학습합니다 (`--final`). 최종 학습은 `submit/model/ranker_*.txt`, `views.json`, `tables.json`, 그리고 랭커를 학습할 때 쓴 검색 설정을 담은 `settings.json`을 씁니다. `script.py`가 이 설정을 적용하므로 변형 모델들이 하나의 `vlib.py`를 공유합니다.
-- `tools/package.py --name vN --smoke`는 `dist/submit_vN.zip`을 만들고, 가짜 서버 폴더에서 네 번 실행해 봅니다.
+- `tools/package.py --name vN --smoke`는 `dist/submit_vN.zip`을 만들고, 가짜 서버 폴더에서 네 번 실행해 봅니다. 업로드할 파일명은 `.zip`까지 30자 이하여야 하므로, 더 긴 이름은 거부합니다(`tools/probe.py`도 같음).
   1. 그대로 실행합니다. train에 있는 호출부호는 조회로 바로 답합니다.
   2. 처음 보는 호출부호로 바꿔 실행합니다. 모든 행이 랭커를 거칩니다.
   3. 이름이 비었거나 숫자뿐이고 톤수가 잘못된 행으로 실행합니다. 실행이 멈추면 안 됩니다.
