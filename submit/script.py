@@ -70,10 +70,13 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
     korean = np.repeat([vlib.hangul_text(rows[k].get("vessel_name")) for k in todo], [len(c) for c in cands])
     scores = rank_scores(np.vstack(feats), korean) if sum(len(c) for c in cands) else np.zeros(0)
     offset = 0
+    best = {}  # row -> position of its pick among its candidates and the pick's score
     for k, cand in zip(todo, cands):
         local = scores[offset: offset + len(cand)]
         offset += len(cand)
-        preds[k] = index.ids[cand[int(np.argmax(local))]] if len(cand) else index.ids[0]
+        if len(cand):
+            best[k] = (int(np.argmax(local)), float(local.max()))
+        preds[k] = index.ids[cand[best[k][0]]] if len(cand) else index.ids[0]
     if vlib.IME_DECODE:
         # a Latin name typed with the Korean layout left on (히ㅐ퍈 = GLOVIS): read it as the keys that typed it
         alt = [k for k in todo if isinstance(rows[k].get("vessel_name"), str) and vlib.IME_RE.search(rows[k]["vessel_name"])]
@@ -89,6 +92,31 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
                 j = int(np.argmax(local))
                 loose = bool(vlib.LOOSE_RE.search(rows[k]["vessel_name"]))  # letters left out of any syllable
                 if vlib.ime_accept(vlib.alnum(vlib.strip_prefix(vlib.upper(row["vessel_name"]))), F[j], loose):
+                    preds[k] = index.ids[cand[j]]
+    if vlib.IME_ENCODE:
+        # a Hangul name typed with the English layout left on (RMFFHQLTM TJS = 글로비스 선): read the Hangul it types
+        pos = {k: i for i, k in enumerate(todo)}
+        alt, hrows = [], []
+        for k in todo:
+            name = rows[k].get("vessel_name")
+            if isinstance(name, str) and not vlib.IME_RE.search(name):
+                typed = vlib.ime_typed(vlib.upper(name))
+                if vlib.HANGUL_RE.search(typed) and not vlib.LOOSE_RE.search(typed):
+                    alt.append(k)
+                    hrows.append(dict(rows[k], vessel_name=typed))
+        h_cands, h_feats = vlib.build_matrix(index, hrows)
+        n = sum(len(c) for c in h_cands)
+        h_scores = rank_scores(np.vstack(h_feats), np.ones(n, dtype=bool)) if n else np.zeros(0)
+        offset = 0
+        for k, cand, F in zip(alt, h_cands, h_feats):
+            local = h_scores[offset: offset + len(cand)]
+            offset += len(cand)
+            if len(cand):
+                j = int(np.argmax(local))
+                an = vlib.alnum(vlib.strip_prefix(vlib.upper(rows[k]["vessel_name"])))
+                lj, ltop = best.get(k, (None, -np.inf))  # the Latin reading's pick, if it had any candidate
+                off = feats[pos[k]][lj, vlib.COL["e_osa"]] / max(len(an), 1) if lj is not None else float("nan")
+                if vlib.ime_encode_accept(off, float(local[j]) - ltop, F[j]):
                     preds[k] = index.ids[cand[j]]
     return preds
 

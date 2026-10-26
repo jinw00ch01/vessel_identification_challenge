@@ -476,7 +476,7 @@ def _ime_pair(jamo: str, key: str, pool) -> str | None:
 
 def ime_typed(text: str) -> str:
     """What a 2-set Korean IME composes when `text` is typed with the Hangul layout on (GLOVIS SUN -> 히ㅐ퍈 녀ㅜ),
-    the inverse of ime_keys; for stress tests."""
+    the inverse of ime_keys: the Hangul a record typed with the wrong layout meant (IME_ENCODE), and the ime stress mode."""
     out, syl = [], []  # syl: the jamo of the syllable being composed, as [cho, jung, jong] (None = empty)
 
     def flush():
@@ -529,6 +529,18 @@ def ime_accept(query_an: str, f: np.ndarray, loose: bool) -> bool:
     allowed = 0 if len(query_an) < 5 else math.floor(len(query_an) * (0.4 if loose else 0.25))
     ton = f[COL["min_alr"]]
     return bool((not math.isfinite(ton) or ton <= 0.3) and f[COL["e_osa"]] <= allowed)
+
+
+def ime_encode_accept(latin_off: float, margin: float, f: np.ndarray) -> bool:
+    """Keep the Hangul reading of a Latin-letter record (its keys composed on the 2-set layout) when the Latin
+    reading's best match is more than a fifth of the name away (or there is none), the tonnage agrees and the Hangul
+    rankers are far surer of their pick than the Latin rankers of theirs (`margin`, top score minus top score): by 3
+    when the pick sounds alike (k_sim 0.7 or more), by 7 otherwise. Real Hangul names typed this way clear it by 7 or
+    more; damaged, cut or random Latin names that happen to compose into Hangul stay below 3."""
+    ton = f[COL["min_alr"]]
+    if latin_off <= 0.2 or (math.isfinite(ton) and ton > 0.3):
+        return False
+    return bool(margin > (3 if f[COL["k_sim"]] >= 0.7 else 7))
 
 
 def korean_variants(name: str, tables: dict | None = None, exclude: str | None = None):
@@ -762,13 +774,16 @@ JAMO_REPAIR = False
 # a Latin name typed with the Korean keyboard layout still on (GLOVIS SUN -> 히ㅐ퍈 녀ㅜ): script.py also reads such
 # a record as the keys that typed it and takes that reading's best match when it spells a catalog name
 IME_DECODE = False
+# ... and the other way: a Hangul name typed with the English layout on (RMFFHQLTM TJS -> 글로비스 선), read as the
+# Hangul it types when that composes cleanly and matches far better than the Latin reading
+IME_ENCODE = False
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
             "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
-            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE")
+            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE", "IME_ENCODE")
 
 
 def current_settings() -> dict:

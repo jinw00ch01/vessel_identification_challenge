@@ -102,6 +102,11 @@ def smoke(zip_path: Path, n_rows: int = 3000) -> None:
     ime = sample[~sample["vessel_name"].map(vlib_is_hangul)].head(200).assign(call_sign="CS_UNSEEN")
     ime["vessel_name"] = ime["vessel_name"].map(vlib.ime_typed)
     run_box(zip_path, ime, "ime")
+    # and Hangul names typed with the English layout on (글로비스 선 -> RMFFHQLTM TJS): with IME_ENCODE the score
+    # stays high (these rows score with the Latin weight)
+    eng = sample[sample["vessel_name"].map(vlib_is_hangul)].head(200).assign(call_sign="CS_UNSEEN")
+    eng["vessel_name"] = eng["vessel_name"].map(vlib.ime_keys)
+    run_box(zip_path, eng, "eng")
 
 
 def jamo_typos(name: str, rng: random.Random, k: int) -> str:
