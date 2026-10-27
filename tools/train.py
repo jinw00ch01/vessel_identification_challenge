@@ -68,6 +68,14 @@ BROAD_LATIN_FRAC = 0.0
 # for this share of Latin rows (Latin copies train only the Latin rankers)
 NOISY_HANGUL = 0
 NOISY_LATIN_FRAC = 0.0
+# copies written as Korean Hanja readings (금성 3호 for JIN XING 3, 행성환 for KOSEI MARU) of the rows whose vessel
+# has a pinyin name, or a Japanese one under the Japanese flag or with MARU; they train the Hangul rankers
+HANJA_COPIES = 0
+HANJA_STRESS_CAP = 400  # held-out rows the "hanja" stress mode scores per fold
+# share of Hangul rows copied with a useless name (garbage syllables), tonnage and fields kept: what to do when
+# the name says nothing
+GARBAGE_HANGUL = 0.0
+_HANJA = {}
 
 
 def load():
@@ -472,6 +480,49 @@ def noisy_copy(df, rng, name_mix, tonnage_mix=None):
     return out
 
 
+def hanja_copy(df, rng):
+    """One copy of each eligible row with the name written as Korean Hanja readings of its vessel's catalog name,
+    tonnage damaged like the Hangul noisy copies."""
+    if "reader" not in _HANJA:
+        cat = pd.read_csv(DATA / "vessel_catalog.csv", encoding="utf-8-sig")
+        _HANJA["reader"] = vlib.HanjaReader(cat["vessel_name"].tolist(), vlib.HANJA_READINGS)
+        _HANJA["pos"] = {v: i for i, v in enumerate(cat["vessel_id"].astype(str))}
+        _HANJA["nums"] = [vlib.numbers_of(vlib.strip_prefix(vlib.upper(v))) for v in cat["vessel_name"]]
+        _HANJA["flag"] = cat["flag_name"].fillna("").astype(str).tolist()
+        _HANJA["maru"] = ["MARU" in vlib.upper(v).split() for v in cat["vessel_name"]]
+    R = _HANJA["reader"]
+    names, keep = [], []
+    for k, vid in enumerate(df["target_vessel_id"].astype(str)):
+        i = _HANJA["pos"].get(vid)
+        if i is None:
+            continue
+        forms = [("py", s) for s in R.strs["py"][i]]
+        if _HANJA["flag"][i] == "Japan" or _HANJA["maru"][i]:
+            forms += [("ja", s) for s in R.strs["ja"][i]]
+        if not forms:
+            continue
+        kind, s = forms[int(rng.integers(len(forms)))]
+        words = R.sample(s, kind, rng)
+        if not words:
+            continue
+        name = (" " if rng.random() < 0.4 else "").join(words)
+        nums = _HANJA["nums"][i]
+        if nums:
+            n = nums[0]
+            name = [f"{name} {n}", f"{name}{n}", f"제{n} {name}", f"{name} {n}호", f"제{n}{name}호"][int(rng.integers(5))]
+        elif rng.random() < 0.3:
+            name += "호"
+        names.append(name)
+        keep.append(k)
+    out = df.iloc[keep].copy()
+    out["vessel_name"] = names
+    mix = TONNAGE_NOISY if TONNAGE_NOISY_HANGUL is None else TONNAGE_NOISY_HANGUL
+    w = np.array([w for _, w in mix])
+    tonnage = np.array([m for m, _ in mix], dtype=object)[rng.choice(len(mix), len(out), p=w / w.sum())]
+    return pd.concat([out[tonnage == tm] if tm == "keep" else perturb(out[tonnage == tm], rng, tm)
+                      for tm in dict.fromkeys(tonnage)]) if len(out) else out
+
+
 def augment(df, rng, copies, mode="aug", name_copies=0):
     """Extra training queries: copies of the Hangul rows with perturbed tonnage, copies with the name
     written differently (NAME_AUG; half of those with perturbed tonnage too when copies > 0), and
@@ -521,6 +572,11 @@ def augment(df, rng, copies, mode="aug", name_copies=0):
         lat = df[~df["vessel_name"].map(vlib.is_hangul)]
         lat = lat[rng.random(len(lat)) < NOISY_LATIN_FRAC]
         parts.append(noisy_copy(lat, rng, noisy_mix("latin")).assign(sample_id=lambda d: d["sample_id"] + "_n_lname"))
+    for c in range(HANJA_COPIES):
+        parts.append(hanja_copy(df, rng).assign(sample_id=lambda d, c=c: d["sample_id"] + f"_hanja{c}"))
+    if GARBAGE_HANGUL:
+        part = kor[rng.random(len(kor)) < GARBAGE_HANGUL]
+        parts.append(perturb_name(part, rng, "garbage").assign(sample_id=lambda d: d["sample_id"] + "_garbage"))
     if NOIGT_FRAC:
         part = kor[kor["international_gross_tonnage"].notna() & (rng.random(len(kor)) < NOIGT_FRAC)]
         parts.append(part.assign(international_gross_tonnage=np.nan, sample_id=lambda d: d["sample_id"] + "_noigt"))
@@ -616,7 +672,12 @@ def cv_once(args, train, catalog, index, rows, kor, kor_idx, cands, feats, split
         for mode in args.stress:
             if mode in ("twin", "nodict"):
                 continue
-            st = compose(train.iloc[va_kor], rng_kor, mode).to_dict("records")
+            if mode == "hanja":
+                # Hanja-read names of the held-out vessels, from their Hangul and Latin rows alike
+                st = hanja_copy(train.iloc[va_idx], rng_kor)
+                st = st.iloc[np.sort(rng_kor.permutation(len(st))[:HANJA_STRESS_CAP])].to_dict("records")
+            else:
+                st = compose(train.iloc[va_kor], rng_kor, mode).to_dict("records")
             s_c, s_f = vlib.build_matrix(index, st)
             s_scores = score(s_f, st)
             s_pred = argmax_ids(index, s_c, s_scores)
@@ -732,6 +793,8 @@ def run_final(args):
     cands, feats = vlib.build_matrix(index, rows)
     aug = augment(train, np.random.default_rng(1000), args.aug, args.aug_mode, args.aug_name).to_dict("records")
     sets = model_sets(rows, cands, feats, aug, vlib.build_matrix(index, aug) if aug else ([], []), args.latin_models)
+    if args.hangul_only:
+        sets.pop("latin", None)
     for old in model_dir.glob("ranker*.txt"):
         old.unlink()
     views = []
@@ -748,6 +811,9 @@ def run_final(args):
         json.dump(tables, fh, ensure_ascii=False)
     with open(model_dir / "settings.json", "w", encoding="utf-8") as fh:
         json.dump(vlib.current_settings(), fh, indent=1)
+    if vlib.HANJA_READINGS:
+        with open(model_dir / "hanja.json", "w", encoding="utf-8") as fh:
+            json.dump(vlib.HANJA_READINGS, fh, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     print(f"saved {len(views)} ranker(s), tables and settings {vlib.current_settings()}")
 
 
@@ -786,6 +852,8 @@ if __name__ == "__main__":
                     help="with --latin-words, also words a record word starts")
     ap.add_argument("--aug-latin-name", type=float, default=LATIN_NAME_FRAC,
                     help="share of multi-word Latin rows copied without their first word")
+    ap.add_argument("--hangul-only", action="store_true",
+                    help="--final with --latin-models: train only the Hangul rankers (Latin rankers taken from another model)")
     ap.add_argument("--latin-models", action=argparse.BooleanOptionalAction, default=LATIN_MODELS,
                     help="separate rankers for Latin rows, the only ones trained on the Latin name copies")
     ap.add_argument("--domestic", action=argparse.BooleanOptionalAction, default=vlib.DOMESTIC_GT,
@@ -832,6 +900,12 @@ if __name__ == "__main__":
                     help="also match Hangul names with doubled characters collapsed (흥흥아영 -> 흥아영)")
     ap.add_argument("--hangul-swap", action=argparse.BooleanOptionalAction, default=vlib.HANGUL_SWAP,
                     help="also match Hangul names with two neighbouring syllables swapped (먼샤 -> 샤먼)")
+    ap.add_argument("--hanja-feat", action=argparse.BooleanOptionalAction, default=vlib.HANJA_FEAT,
+                    help="Hanja-reading candidates and features for Hangul names (needs --hanja-path)")
+    ap.add_argument("--hanja-copies", type=int, default=HANJA_COPIES, help="Hanja-reading copies per eligible row")
+    ap.add_argument("--hanja-path", default=str(WORK / "hanja.json"), help="readings from tools/build_hanja.py")
+    ap.add_argument("--garbage-hangul", type=float, default=GARBAGE_HANGUL,
+                    help="share of Hangul rows copied with a useless name, tonnage and fields kept")
     ap.add_argument("--aug-noigt", type=float, default=NOIGT_FRAC,
                     help="share of Hangul rows copied with the international tonnage blank")
     a = ap.parse_args()
@@ -871,6 +945,12 @@ if __name__ == "__main__":
     vlib.HANGUL_OUTER_N = a.hangul_outer_n
     vlib.HANGUL_DEDUP = a.hangul_dedup
     vlib.HANGUL_SWAP = a.hangul_swap
+    vlib.HANJA_FEAT = a.hanja_feat
+    HANJA_COPIES = a.hanja_copies
+    GARBAGE_HANGUL = a.garbage_hangul
+    if a.hanja_feat or a.hanja_copies or "hanja" in a.stress:
+        with open(a.hanja_path, encoding="utf-8") as fh:
+            vlib.HANJA_READINGS = json.load(fh)
     if a.cv:
         run_cv(a)
     if a.final:

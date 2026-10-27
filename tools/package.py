@@ -83,6 +83,8 @@ def smoke(zip_path: Path, n_rows: int = 3000) -> None:
     # malformed rows must not stop the run: blank or number-only names, blank or bad numbers
     odd = sample.head(12).assign(call_sign="CS_UNSEEN").copy()
     odd["vessel_name"] = [None, "", "123", "호", "제1호", "2호", "M/V", "오슬로(OSLO)", "HMM 오슬로", "ㄱ", "가스오너", "DILAM"]
+    # text in a number column (pandas 3 refuses it in a float column)
+    odd[["gross_tonnage", "international_gross_tonnage"]] = odd[["gross_tonnage", "international_gross_tonnage"]].astype(object)
     odd.loc[odd.index[8:], ["gross_tonnage", "international_gross_tonnage"]] = [[None, None], [0, -5], ["abc", None], [None, 1e9]]
     odd.loc[odd.index[::3], ["flag_name", "vessel_type", "arrival_year"]] = None
     run_box(zip_path, odd, "odd", score=False)
@@ -107,6 +109,11 @@ def smoke(zip_path: Path, n_rows: int = 3000) -> None:
     eng = sample[sample["vessel_name"].map(vlib_is_hangul)].head(200).assign(call_sign="CS_UNSEEN")
     eng["vessel_name"] = eng["vessel_name"].map(vlib.ime_keys)
     run_box(zip_path, eng, "eng")
+    # Latin names with a Hangul marker (GLOVIS SUN호, 엠브이 GLOVIS SUN, (GLOVIS SUN) 글로비스 선): they count as Hangul
+    # rows; with MIXED_LATIN the Latin rankers read the Latin name and the score stays high
+    mix = sample[~sample["vessel_name"].map(vlib_is_hangul)].head(300).assign(call_sign="CS_UNSEEN")
+    mix["vessel_name"] = [(f"{v}호", f"엠브이 {v}", f"({v}) 선박")[i % 3] for i, v in enumerate(mix["vessel_name"])]
+    run_box(zip_path, mix, "mixed")
 
 
 def jamo_typos(name: str, rng: random.Random, k: int) -> str:

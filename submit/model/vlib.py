@@ -558,6 +558,42 @@ def ime_encode_accept(latin_off: float, margin: float, f: np.ndarray) -> bool:
     return bool(margin > (3 if f[COL["k_sim"]] >= 0.7 else 7))
 
 
+BRACKET_RE = re.compile(r"[(\[{（［【]([^)\]}）］】]*)[)\]}）］】]?")
+MARKER_RE = re.compile(r"^(?:엠\s*브이|엠\s*티|엠/브이)\s+")
+
+
+def _bare(part: str) -> str:
+    part = MARKER_RE.sub("", part.strip())
+    part = re.sub(r"제\s*(\d+)\s*[호號]?", r" \1 ", part)
+    part = re.sub(r"(\d+)\s*[호號]", r" \1 ", part)
+    part = re.sub(r"\s*[호號]\s*$", "", part.strip())
+    return re.sub(r"\s+", " ", part).strip()
+
+
+def latin_reading(name) -> str | None:
+    """The Latin name inside a Hangul record when it is the whole name: GLOVIS SUN호, 제3 GLOVIS SUN, 엠브이 GLOVIS
+    SUN, GLOVIS SUN(글로비스 선), or 글로비스 선(GLOVIS SUN) when the two sound alike (a remark such as (LPG) or
+    (EX-SEA STAR) does not). None without a Latin part of three letters or more, or when Hangul words other than
+    those markers stand next to it (HMM 세부: the Hangul reading handles acronyms)."""
+    text = upper(name)
+    if not HANGUL_RE.search(text) or not re.search("[A-Z]", text):
+        return None
+    if not BRACKET_RE.search(text):
+        part = _bare(text)
+        return part if not HANGUL_RE.search(part) and len(re.findall("[A-Z]", part)) >= 3 else None
+    outer, inner = _bare(BRACKET_RE.sub(" ", text)), _bare(" ".join(BRACKET_RE.findall(text)))
+    for part, other, is_outer in ((outer, inner, True), (inner, outer, False)):
+        if HANGUL_RE.search(part) or len(re.findall("[A-Z]", part)) < 3:
+            continue
+        if is_outer:
+            return part
+        keys = korean_variants(other)["keys"]
+        latin = [english_key(part, alt) for alt in range(N_ALT)]
+        if keys and max(Levenshtein.normalized_similarity(a, b) for a in keys for b in latin) >= 0.5:
+            return part
+    return None
+
+
 def korean_variants(name: str, tables: dict | None = None, exclude: str | None = None):
     """Whole-name phonetic keys for a Hangul ship name plus token-level info; with HANGUL_DEDUP also the
     keys of the name with doubled characters collapsed, and its numbers when they differ (alt_numbers);
@@ -722,6 +758,8 @@ FEATURES = [
     "k_dict_cov", "k_dict_hit", "k_dict_miss", "k_n_words", "k_rsim", "k_rsim_rank", "k_tok_first",
     "k_vsim", "k_vsim_rank", "k_acro_n", "k_acro_hit", "k_krsim", "k_krsim_rank",
     "e_idf_share", "e_idf_max", "e_last_tok",
+    # with HANJA_FEAT (appended last, so rankers trained before them read the leading columns only)
+    "h_read", "h_read_rank",
 ]
 COL = {f: i for i, f in enumerate(FEATURES)}
 
@@ -797,6 +835,9 @@ IME_ENCODE = False
 # numbers written out in a Hangul name (그랜드 에이스 일레븐, 넘버 세븐 하나, 인터오션 투 = Interocean II): English number
 # words after the first word count as numbers, 넘버 as the No. before one
 NUM_WORDS = False
+# a Hangul record that carries the vessel's Latin name (GLOVIS SUN호, 엠브이 GLOVIS SUN, 글로비스 선(GLOVIS SUN)):
+# train has no such record, so script.py also reads the Latin name with the Latin rankers (see latin_reading)
+MIXED_LATIN = False
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
@@ -804,7 +845,7 @@ SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
             "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
             "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE", "IME_MARGIN", "IME_ENCODE", "NUM_WORDS",
-            "HANJA_READ", "HANJA_WIN", "HANJA_TOP", "HANJA_GAP")
+            "MIXED_LATIN", "HANJA_READ", "HANJA_WIN", "HANJA_TOP", "HANJA_GAP", "HANJA_FEAT", "HANJA_N")
 
 
 def current_settings() -> dict:
@@ -891,6 +932,8 @@ class CatalogIndex:
         self.postings = {t: np.array(v) for t, v in postings.items() if len(t) >= 3}
         self.tok_sorted = sorted(self.postings)
         self.short_postings = {t: np.array(v) for t, v in postings.items() if len(t) == 2}
+        self.hanja = (HanjaReader(cat["vessel_name"].tolist(), HANJA_READINGS)
+                      if (HANJA_FEAT or HANJA_READ) and HANJA_READINGS else None)
 
     def idf(self, token: str) -> float:
         return math.log((len(self.ids) + 1) / (self.tok_df.get(token, 0) + 1))
@@ -1074,6 +1117,10 @@ class CatalogIndex:
 
     def korean_candidates(self, kv: dict, gt: float, igt: float, limit: int = 80):
         names = self.word_candidates(kv, gt, igt)
+        if HANJA_FEAT and self.hanja is not None:
+            hits = self.hanja.matches_kv(self, kv, gt, igt)[:HANJA_N]
+            if hits:
+                names = np.union1d(names, np.array([h[2] for h in hits], dtype=names.dtype))
         if WHOLE_NAME_SEARCH == "always" or not (math.isfinite(gt) or math.isfinite(igt)):
             names = np.union1d(names, self.name_candidates(kv, gt, igt))
         if math.isfinite(gt) or math.isfinite(igt):
@@ -1255,6 +1302,18 @@ class CatalogIndex:
                               dtype=np.float32)[0]
         F[:, COL["k_krsim"]] = krsim
         F[:, COL["k_krsim_rank"]] = _rank_desc(krsim)
+        if HANJA_FEAT and self.hanja is not None:
+            q = self.hanja.query(kv)
+            h = np.full(m, np.nan, dtype=np.float32)
+            if len(q) >= 2:
+                for j, i in enumerate(cand):
+                    if self.hanja.parsed[i]:
+                        r = self.hanja.score(q, int(i))
+                        if r is not None:
+                            h[j] = r
+            F[:, COL["h_read"]] = h
+            if np.isfinite(h).any():
+                F[:, COL["h_read_rank"]] = np.where(np.isfinite(h), _rank_desc(np.nan_to_num(h, nan=-99.0)), np.nan)
         F[:, COL["k_acro_n"]] = len(kv["acros"])
         F[:, COL["k_acro_hit"]] = self.acronym_hits(kv["acros"], cand)
         F[:, COL["k_partial"]] = part
@@ -1365,6 +1424,12 @@ HANJA_READ = False
 HANJA_WIN = 0.3
 HANJA_TOP = 0.0
 HANJA_GAP = 0.15
+# with HANJA_FEAT the rankers see the reading instead: such vessels join the Hangul candidates (at most HANJA_N)
+# and every Hangul candidate gets its reading score (h_read, missing when the syllables do not all match)
+HANJA_FEAT = False
+HANJA_N = 20
+# the readings (model/hanja.json), loaded by the caller before the catalog index is built
+HANJA_READINGS = None
 
 
 def canon_ja(s: str) -> str:
@@ -1467,6 +1532,34 @@ class HanjaReader:
                     stack.append((i + 1, j + l))
         return None if best is None else best / n
 
+    def sample(self, s: str, kind: str, rng) -> list[str] | None:
+        """Korean readings for a catalog string: a random split into syllables, a reading per syllable drawn by
+        its weight; words stay apart (None when the string does not split)."""
+        inv, top = self.inv[kind], self.maxlen[kind]
+        n = len(s)
+        ends = [False] * (n + 1)  # a split from here reaches the end
+        ends[n] = True
+        for j in range(n - 1, -1, -1):
+            ends[j] = (s[j] == "|" and ends[j + 1]) or any(
+                ends[j + l] and "|" not in s[j:j + l] and s[j:j + l] in inv for l in range(1, min(top, n - j) + 1))
+        if not ends[0]:
+            return None
+        words, cur, j = [], "", 0
+        while j < n:
+            if s[j] == "|":
+                words.append(cur)
+                cur, j = "", j + 1
+                continue
+            steps = [l for l in range(1, min(top, n - j) + 1) if "|" not in s[j:j + l] and s[j:j + l] in inv and ends[j + l]]
+            l = steps[int(rng.integers(len(steps)))]
+            opts = inv[s[j:j + l]]
+            ks = list(opts)
+            w = np.exp(np.array([opts[k] for k in ks]))
+            cur += ks[int(rng.choice(len(ks), p=w / w.sum()))]
+            j += l
+        words.append(cur)
+        return [w for w in words if w]
+
     def score(self, q: str, i: int) -> float | None:
         out = None
         for kind in ("py", "ja"):
@@ -1476,12 +1569,23 @@ class HanjaReader:
                     out = r
         return out
 
+    @staticmethod
+    def query(kv: dict) -> str:
+        """The record's Hangul syllables, numbers, 제 and a final 호 left out."""
+        return "".join(ch for w in kv["words"] for ch in w if HANGUL_RE.match(ch))
+
+    def matches_kv(self, index: "CatalogIndex", kv: dict, gt: float, igt: float) -> list[tuple[float, float, int]]:
+        return self._matches(index, self.query(kv), kv["numbers"], gt, igt)
+
     def matches(self, index: "CatalogIndex", row: dict) -> list[tuple[float, float, int]]:
         """(score, -tonnage gap, catalog position) of every full match, best first."""
         words, nums = korean_tokens(upper(row.get("vessel_name")))
         q = "".join(ch for w in words for ch in w if HANGUL_RE.match(ch))
         gt = positive_float(row.get("gross_tonnage"))
         igt = positive_float(row.get("international_gross_tonnage"))
+        return self._matches(index, q, nums, gt, igt)
+
+    def _matches(self, index, q, nums, gt, igt):
         if len(q) < 2 or not (math.isfinite(gt) or math.isfinite(igt)):
             return []
         pool = index._gt_window([gt, igt], HANJA_WIN)

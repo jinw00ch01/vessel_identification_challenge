@@ -43,7 +43,8 @@ def rank_scores(X: np.ndarray, korean: np.ndarray) -> np.ndarray:
         booster = lgb.Booster(model_file=str(BASE / "model" / view["file"]))
         Xv = X[mask]
         Xv[:, [vlib.COL[f] for f in view["drop"]]] = np.nan
-        total[mask] += booster.predict(Xv)
+        # rankers trained before the last features were added read the leading columns only
+        total[mask] += booster.predict(Xv[:, :booster.num_feature()])
         count[mask] += 1
     return total / np.maximum(count, 1)
 
@@ -65,6 +66,10 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
     todo = [k for k, p in enumerate(preds) if p is None]
     if not todo:
         return preds
+    hanja_path = BASE / "model" / "hanja.json"
+    if (vlib.HANJA_READ or vlib.HANJA_FEAT) and hanja_path.exists():
+        with open(hanja_path, encoding="utf-8") as fh:
+            vlib.HANJA_READINGS = json.load(fh)
     index = vlib.CatalogIndex(catalog, tables)
     cands, feats = vlib.build_matrix(index, [rows[k] for k in todo])
     korean = np.repeat([vlib.hangul_text(rows[k].get("vessel_name")) for k in todo], [len(c) for c in cands])
@@ -120,15 +125,27 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
                 off = feats[pos[k]][lj, vlib.COL["e_osa"]] / max(len(an), 1) if lj is not None else float("nan")
                 if vlib.ime_encode_accept(off, float(local[j]) - ltop, F[j]):
                     preds[k] = index.ids[cand[j]]
-    hanja_path = BASE / "model" / "hanja.json"
-    if vlib.HANJA_READ and hanja_path.exists():
+    if vlib.MIXED_LATIN:
+        # a Hangul record that carries the vessel's Latin name (GLOVIS SUN호, 글로비스 선(GLOVIS SUN)): train has none,
+        # so the Hangul rankers misread it; the Latin rankers' pick for the Latin name itself is right far more often
+        # (synthetic records of unseen vessels: 0.950 against 0.853, and no score margin does better)
+        alt = [(k, vlib.latin_reading(rows[k].get("vessel_name"))) for k in todo if vlib.hangul_text(rows[k].get("vessel_name"))]
+        alt = [(k, text) for k, text in alt if text]
+        m_cands, m_feats = vlib.build_matrix(index, [dict(rows[k], vessel_name=text) for k, text in alt])
+        n = sum(len(c) for c in m_cands)
+        m_scores = rank_scores(np.vstack(m_feats), np.zeros(n, dtype=bool)) if n else np.zeros(0)
+        offset = 0
+        for (k, _), cand in zip(alt, m_cands):
+            local = m_scores[offset: offset + len(cand)]
+            offset += len(cand)
+            if len(cand):
+                preds[k] = index.ids[cand[int(np.argmax(local))]]
+    if vlib.HANJA_READ and index.hanja is not None:
         # a Hangul name written as the Korean Hanja reading of a Chinese or Japanese name (금성 3호 = JIN XING 3)
-        with open(hanja_path, encoding="utf-8") as fh:
-            reader = vlib.HanjaReader(catalog["vessel_name"].tolist(), json.load(fh))
         for k in todo:
             if not vlib.is_hangul(rows[k].get("vessel_name")):
                 continue
-            hits = reader.matches(index, rows[k])
+            hits = index.hanja.matches(index, rows[k])
             if not hits or index.ids[hits[0][2]] == preds[k]:
                 continue
             top = best[k][1] if k in best else -np.inf
