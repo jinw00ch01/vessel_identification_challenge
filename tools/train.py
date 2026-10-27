@@ -182,6 +182,11 @@ def perturb(df, rng, mode):
         col = "vessel_type" if mode == "badtype" else "flag_name"
         df[col] = df[col].to_numpy()[rng.permutation(len(df))]
         return df
+    if mode == "swapton":
+        # both tonnage fields taken from another record: tonnage that says nothing about the vessel
+        perm = rng.permutation(len(df))
+        df[["gross_tonnage", "international_gross_tonnage"]] = df[["gross_tonnage", "international_gross_tonnage"]].to_numpy()[perm]
+        return df
     if mode == "nameonly":
         # only the name kept: what the name alone is worth (tools/probe.py latin_nameonly does the same)
         df[["gross_tonnage", "international_gross_tonnage", "vessel_type", "flag_name"]] = None

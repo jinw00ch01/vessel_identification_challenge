@@ -27,6 +27,9 @@ one part of the test set:
     nameonly_tonfix  Hangul rows predicted from the name alone (hangul_nameonly) and Latin rows counted as in
                  notonnage_fix, from one extra prediction: the Hangul count says whether the evaluation's
                  Hangul names are as readable as train's (in-sample v10n 0.985 on clean names)
+    nameonly_fix  each row is also predicted from its name alone (tonnage, type and flag blank); that prediction
+                 is kept where it differs from the full one, the dummy elsewhere: counts the misses that ignoring
+                 every other field would fix, Hangul and Latin at once (high = the other fields mislead the model)
     small_vessels  rows whose recorded tonnage (the larger field) is under 500 keep their prediction, the others
                  get the dummy: train has no target that small (the catalog has 21%), so the Latin count is about
                  how many such records there are, and the Hangul count how many of them the model gets right
@@ -166,6 +169,15 @@ ANCHORS = {
         "    blank.loc[~hangul, [\"gross_tonnage\", \"international_gross_tonnage\"]] = np.nan\n"
         "    alt = predict(blank, catalog)\n"
         f"    preds = [q if h else (q if q != p else {DUMMY!r}) for h, p, q in zip(hangul, preds, alt)]\n",
+    ),
+    "nameonly_fix": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    # probe: the prediction from the name alone, where it differs from the full one\n"
+        "    blank = test.copy()\n"
+        "    blank[[\"gross_tonnage\", \"international_gross_tonnage\", \"vessel_type\", \"flag_name\"]] = np.nan\n"
+        "    alt = predict(blank, catalog)\n"
+        f"    preds = [q if q != p else {DUMMY!r} for p, q in zip(preds, alt)]\n",
     ),
     "small_vessels": (
         "    preds = predict(test, catalog)\n",

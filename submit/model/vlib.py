@@ -264,6 +264,10 @@ LETTER_NAMES = sorted({
     "더블유": "W", "엑스": "X", "와이": "Y", "제트": "Z", "젯": "Z",
 }.items(), key=lambda kv: -len(kv[0]))
 KOREAN_NUMBER_WORDS = {"원": "1", "투": "2", "쓰리": "3", "포": "4", "파이브": "5"}
+# with NUM_WORDS; 원 and 포 are also plain words (원 오션, 포 리버), so they count only as the last word
+MORE_NUMBER_WORDS = {"식스": "6", "세븐": "7", "에이트": "8", "에잇": "8", "나인": "9", "텐": "10", "일레븐": "11",
+                     "트웰브": "12", "써틴": "13", "서틴": "13", "피프틴": "15", "트웬티": "20", "투": "2", "쓰리": "3",
+                     "스리": "3", "파이브": "5"}
 
 
 def _syllables(text: str):
@@ -354,6 +358,10 @@ def korean_tokens(name: str) -> tuple[list[str], tuple[str, ...]]:
             nums.append(tok)
         elif tok in KOREAN_NUMBER_WORDS and idx == len(toks) - 1 and idx > 0:
             nums.append(KOREAN_NUMBER_WORDS[tok])
+        elif NUM_WORDS and tok in MORE_NUMBER_WORDS and idx > 0:
+            nums.append(MORE_NUMBER_WORDS[tok])
+        elif NUM_WORDS and tok == "넘버" and len(toks) > 1:
+            continue
         elif tok in ROMAN and idx > 0:
             nums.append(ROMAN[tok])
         else:
@@ -786,13 +794,16 @@ IME_MARGIN = False
 # the reverse of IME_DECODE: a Hangul name typed with the English layout on (RMFFHQLTM TJS -> 글로비스 선), read as
 # the Hangul it types when that composes cleanly and matches far better than the Latin reading
 IME_ENCODE = False
+# numbers written out in a Hangul name (그랜드 에이스 일레븐, 넘버 세븐 하나, 인터오션 투 = Interocean II): English number
+# words after the first word count as numbers, 넘버 as the No. before one
+NUM_WORDS = False
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
             "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
-            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE", "IME_MARGIN", "IME_ENCODE")
+            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE", "IME_MARGIN", "IME_ENCODE", "NUM_WORDS")
 
 
 def current_settings() -> dict:
