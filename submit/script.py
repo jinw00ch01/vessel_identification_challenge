@@ -120,6 +120,20 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
                 off = feats[pos[k]][lj, vlib.COL["e_osa"]] / max(len(an), 1) if lj is not None else float("nan")
                 if vlib.ime_encode_accept(off, float(local[j]) - ltop, F[j]):
                     preds[k] = index.ids[cand[j]]
+    hanja_path = BASE / "model" / "hanja.json"
+    if vlib.HANJA_READ and hanja_path.exists():
+        # a Hangul name written as the Korean Hanja reading of a Chinese or Japanese name (금성 3호 = JIN XING 3)
+        with open(hanja_path, encoding="utf-8") as fh:
+            reader = vlib.HanjaReader(catalog["vessel_name"].tolist(), json.load(fh))
+        for k in todo:
+            if not vlib.is_hangul(rows[k].get("vessel_name")):
+                continue
+            hits = reader.matches(index, rows[k])
+            if not hits or index.ids[hits[0][2]] == preds[k]:
+                continue
+            top = best[k][1] if k in best else -np.inf
+            if top < vlib.HANJA_TOP and -hits[0][1] <= vlib.HANJA_GAP:
+                preds[k] = index.ids[hits[0][2]]
     return preds
 
 

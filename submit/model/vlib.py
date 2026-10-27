@@ -803,7 +803,8 @@ NUM_WORDS = False
 SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX", "DOMESTIC_GT", "PAREN_STRIP",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
             "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
-            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE", "IME_MARGIN", "IME_ENCODE", "NUM_WORDS")
+            "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE", "IME_MARGIN", "IME_ENCODE", "NUM_WORDS",
+            "HANJA_READ", "HANJA_WIN", "HANJA_TOP", "HANJA_GAP")
 
 
 def current_settings() -> dict:
@@ -1348,3 +1349,149 @@ def weighted_accuracy(names, truth, pred) -> dict:
     hk = float(ok[kor].mean()) if kor.any() else float("nan")
     he = float(ok[~kor].mean()) if (~kor).any() else float("nan")
     return {"korean": hk, "non_korean": he, "score": 0.7 * hk + 0.3 * he}
+
+
+# ---------------------------------------------------------------------------
+# Hangul names written as Korean Hanja readings of Chinese or Japanese names
+# ---------------------------------------------------------------------------
+# with HANJA_READ, a Hangul record whose syllables are Korean readings of a Chinese (pinyin) or Japanese
+# catalog name, one per syllable in order (금성 3호 = JIN XING 3, 행성환 = KOSEI MARU), replaces the ranker's
+# pick when the ranker is unsure of it; model/hanja.json holds the readings per romanised syllable
+# (KANJIDIC2 character readings and the hanja package's table, no vessel data)
+HANJA_READ = False
+# tonnage window searched for those catalog names; the ranker's top score below which its pick gives way (on
+# train rows, sure picks of short names such as 우진 or 하나 also read as Hanja: 우진 = YU JIN); and how far
+# (|log ratio|) the reading's vessel may be from the recorded tonnage
+HANJA_WIN = 0.3
+HANJA_TOP = 0.0
+HANJA_GAP = 0.15
+
+
+def canon_ja(s: str) -> str:
+    """One spelling for Japanese romaji (Hepburn or Kunrei, long vowels written or not)."""
+    s = s.upper()
+    for a, b in (("SYA", "SHA"), ("SYU", "SHU"), ("SYO", "SHO"), ("TYA", "CHA"), ("TYU", "CHU"), ("TYO", "CHO"),
+                 ("ZYA", "JA"), ("ZYU", "JU"), ("ZYO", "JO"), ("JYA", "JA"), ("JYU", "JU"), ("JYO", "JO"),
+                 ("DYA", "JA"), ("DYU", "JU"), ("DYO", "JO")):
+        s = s.replace(a, b)
+    s = re.sub(r"TU", "TSU", s)
+    s = re.sub(r"(?<![SC])HU", "FU", s)
+    s = re.sub(r"(?<![SC])SI", "SHI", s)
+    s = re.sub(r"(?<!S)TI", "CHI", s)
+    s = re.sub(r"[ZD]I", "JI", s)
+    s = re.sub(r"DU", "ZU", s)
+    s = re.sub(r"M(?=[BPM])", "N", s)
+    s = re.sub(r"OU|OO|OH(?![AIUEO])", "O", s)
+    return re.sub(r"UU", "U", s)
+
+
+class HanjaReader:
+    """Catalog names that split into pinyin or Japanese syllables, and full syllable-by-syllable matches of
+    Hangul records against them (mean log share of each Korean reading among its syllable's readings)."""
+
+    def __init__(self, names: list[str], readings: dict) -> None:
+        self.inv, self.maxlen = {}, {}
+        for kind in ("py", "ja"):
+            inv = {}
+            for syl, opts in readings[kind].items():
+                total = sum(opts.values())
+                inv[syl] = {k: math.log(w / total) for k, w in opts.items()}
+            self.inv[kind] = inv
+            self.maxlen[kind] = max(map(len, inv))
+        self.strs = {"py": [], "ja": []}
+        for name in names:
+            toks = self._letter_tokens(name)
+            py = "|".join(toks)
+            self.strs["py"].append((py,) if toks and self._parses(py, "py") else ())
+            # Japanese 丸 (MARU) may be read 환 or replaced by the Korean 호, which records drop like any 호
+            forms = ["|".join(canon_ja(t) for t in toks)]
+            if "MARU" in toks and len(toks) > 1:
+                forms.append("|".join(canon_ja(t) for t in toks if t != "MARU"))
+            self.strs["ja"].append(tuple(f for f in forms if toks and self._parses(f, "ja")))
+        self.parsed = np.array([bool(a or b) for a, b in zip(self.strs["py"], self.strs["ja"])])
+
+    @staticmethod
+    def _letter_tokens(name) -> list[str]:
+        toks = re.sub(r"[^A-Z0-9 ]+", " ", upper(name)).split()
+        out = []
+        for k, t in enumerate(toks):
+            if not t.isalpha():
+                continue
+            nxt_num = k + 1 < len(toks) and toks[k + 1][:1].isdigit()
+            near_num = nxt_num or (k > 0 and toks[k - 1][:1].isdigit())
+            if (t == "NO" and nxt_num) or (t in ("HAO", "GO") and near_num):  # No. / 号 / 号: the 호 records drop
+                continue
+            out.append(t)
+        return out
+
+    def _parses(self, s: str, kind: str) -> bool:
+        inv, top = self.inv[kind], self.maxlen[kind]
+        ok = [False] * (len(s) + 1)
+        ok[0] = True
+        for j in range(len(s)):
+            if not ok[j]:
+                continue
+            if s[j] == "|":
+                ok[j + 1] = True
+                continue
+            for l in range(1, min(top, len(s) - j) + 1):
+                if s[j:j + l] in inv:
+                    ok[j + l] = True
+        return ok[len(s)]
+
+    def _dp(self, q: str, s: str, kind: str) -> float | None:
+        inv, top = self.inv[kind], self.maxlen[kind]
+        n, m = len(q), len(s)
+        seen, stack, best = {(0, 0): 0.0}, [(0, 0)], None
+        while stack:
+            i, j = stack.pop()
+            v = seen[(i, j)]
+            if i == n and j == m:
+                best = v if best is None or v > best else best
+                continue
+            if j < m and s[j] == "|":
+                if seen.get((i, j + 1), -math.inf) < v:
+                    seen[(i, j + 1)] = v
+                    stack.append((i, j + 1))
+                continue
+            if i == n or j == m:
+                continue
+            for l in range(1, min(top, m - j) + 1):
+                syl = s[j:j + l]
+                if "|" in syl:
+                    break
+                opts = inv.get(syl)
+                w = opts.get(q[i]) if opts else None
+                if w is not None and seen.get((i + 1, j + l), -math.inf) < v + w:
+                    seen[(i + 1, j + l)] = v + w
+                    stack.append((i + 1, j + l))
+        return None if best is None else best / n
+
+    def score(self, q: str, i: int) -> float | None:
+        out = None
+        for kind in ("py", "ja"):
+            for s in self.strs[kind][i]:
+                r = self._dp(q, s, kind)
+                if r is not None and (out is None or r > out):
+                    out = r
+        return out
+
+    def matches(self, index: "CatalogIndex", row: dict) -> list[tuple[float, float, int]]:
+        """(score, -tonnage gap, catalog position) of every full match, best first."""
+        words, nums = korean_tokens(upper(row.get("vessel_name")))
+        q = "".join(ch for w in words for ch in w if HANGUL_RE.match(ch))
+        gt = positive_float(row.get("gross_tonnage"))
+        igt = positive_float(row.get("international_gross_tonnage"))
+        if len(q) < 2 or not (math.isfinite(gt) or math.isfinite(igt)):
+            return []
+        pool = index._gt_window([gt, igt], HANJA_WIN)
+        out = []
+        for i in pool[self.parsed[pool]]:
+            if index.nums[i] != nums:
+                continue
+            r = self.score(q, i)
+            if r is not None:
+                gap = np.nan_to_num(index._min_alr(np.array([i]), gt, igt), nan=9.0)[0]
+                out.append((r, -float(gap), int(i)))
+        out.sort(reverse=True)
+        return out
