@@ -79,7 +79,7 @@ def main() -> None:
     a = ap.parse_args()
     zip_name = f"submit_{a.name}.zip"
     assert len(zip_name) <= 30, f"{zip_name} is longer than 30 characters"
-    work, data = Path(a.work), Path(a.data)
+    work, data = Path(a.work).resolve(), Path(a.data).resolve()  # the smoke runs change the working directory
     pkg = work / a.name
     shutil.rmtree(pkg, ignore_errors=True)
     pkg.mkdir(parents=True)
