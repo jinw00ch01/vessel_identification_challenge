@@ -17,3 +17,6 @@ venv/
 # tables.json holds lookups derived from train.csv, so it must stay out of the public repo.
 submit/model/ranker*.txt
 submit/model/tables.json
+# few-shot train records for the language-model reader (tools/build_lm_shots.py) and the model weights
+submit/model/lm_shots.json
+submit/model/lm/

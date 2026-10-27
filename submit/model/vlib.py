@@ -838,6 +838,12 @@ NUM_WORDS = False
 # a Hangul record that carries the vessel's Latin name (GLOVIS SUN호, 엠브이 GLOVIS SUN, 글로비스 선(GLOVIS SUN)):
 # train has no such record, so script.py also reads the Latin name with the Latin rankers (see latin_reading)
 MIXED_LATIN = False
+# a Hangul name read back into Latin letters by a pretrained language model in model/lm (see lmread.py), for names
+# that translate the vessel's name (바다 공주 = SEA PRINCESS); the Latin rankers' pick for the best reading replaces
+# the Hangul pick when its score is higher by more than LM_MARGIN. LM_PROMPT names the prompt in lmread.PROMPTS
+LM_READ = False
+LM_MARGIN = 0.0
+LM_PROMPT = "meaning"
 
 
 # retrieval switches the rankers were trained with; train.py --final saves them to model/settings.json
@@ -845,7 +851,8 @@ SETTINGS = ("WHOLE_NAME_SEARCH", "EXACT_TONNAGE", "LATIN_WORDS", "LATIN_PREFIX",
             "LATIN_SORTED", "LATIN_RELCUT", "LATIN_WIDE", "LATIN_TON_WIN", "HANGUL_WIN", "HANGUL_LIMIT", "HANGUL_PRE_TON",
             "HANGUL_PARTIAL_EXTRA", "HANGUL_OUTER", "HANGUL_OUTER_N", "HANGUL_DEDUP",
             "HANGUL_SWAP", "JAMO_KEYS", "JAMO_REPAIR", "IME_DECODE", "IME_MARGIN", "IME_ENCODE", "NUM_WORDS",
-            "MIXED_LATIN", "HANJA_READ", "HANJA_WIN", "HANJA_TOP", "HANJA_GAP", "HANJA_FEAT", "HANJA_N")
+            "MIXED_LATIN", "LM_READ", "LM_MARGIN", "LM_PROMPT", "HANJA_READ", "HANJA_WIN", "HANJA_TOP", "HANJA_GAP",
+            "HANJA_FEAT", "HANJA_N")
 
 
 def current_settings() -> dict:

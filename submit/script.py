@@ -151,6 +151,33 @@ def predict(test: pd.DataFrame, catalog: pd.DataFrame) -> list[str]:
             top = best[k][1] if k in best else -np.inf
             if top < vlib.HANJA_TOP and -hits[0][1] <= vlib.HANJA_GAP:
                 preds[k] = index.ids[hits[0][2]]
+    if vlib.LM_READ and (BASE / "model" / "lm").is_dir():
+        # a Hangul name that translates the vessel's name (바다 공주 = SEA PRINCESS): train has none, so the Hangul
+        # rankers cannot place it; a pretrained language model reads it back into Latin letters and the Latin
+        # rankers' pick for its best reading wins when that scores higher than the Hangul pick by LM_MARGIN
+        import lmread
+
+        reader = lmread.Reader(BASE / "model" / "lm", lmread.load_shots(BASE / "model" / "lm_shots.json"),
+                               prompt=vlib.LM_PROMPT)
+        alt, arows = [], []
+        for k in todo:
+            name = rows[k].get("vessel_name")
+            if vlib.hangul_text(name):
+                for text in reader.read(name):
+                    alt.append(k)
+                    arows.append(dict(rows[k], vessel_name=text))
+        l_cands, l_feats = vlib.build_matrix(index, arows)
+        n = sum(len(c) for c in l_cands)
+        l_scores = rank_scores(np.vstack(l_feats), np.zeros(n, dtype=bool)) if n else np.zeros(0)
+        offset, lm_best = 0, {}
+        for k, cand in zip(alt, l_cands):
+            local = l_scores[offset: offset + len(cand)]
+            offset += len(cand)
+            if len(cand) and (k not in lm_best or float(local.max()) > lm_best[k][1]):
+                lm_best[k] = (index.ids[cand[int(np.argmax(local))]], float(local.max()))
+        for k, (vid, score) in lm_best.items():
+            if score - best.get(k, (None, -np.inf))[1] > vlib.LM_MARGIN:
+                preds[k] = vid
     return preds
 
 
