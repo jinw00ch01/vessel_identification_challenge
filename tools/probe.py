@@ -27,6 +27,9 @@ one part of the test set:
     nameonly_tonfix  Hangul rows predicted from the name alone (hangul_nameonly) and Latin rows counted as in
                  notonnage_fix, from one extra prediction: the Hangul count says whether the evaluation's
                  Hangul names are as readable as train's (in-sample v10n 0.985 on clean names)
+    small_vessels  rows whose recorded tonnage (the larger field) is under 500 keep their prediction, the others
+                 get the dummy: train has no target that small (the catalog has 21%), so the Latin count is about
+                 how many such records there are, and the Hangul count how many of them the model gets right
 
 and one variant that is a model change rather than a probe:
 
@@ -163,6 +166,13 @@ ANCHORS = {
         "    blank.loc[~hangul, [\"gross_tonnage\", \"international_gross_tonnage\"]] = np.nan\n"
         "    alt = predict(blank, catalog)\n"
         f"    preds = [q if h else (q if q != p else {DUMMY!r}) for h, p, q in zip(hangul, preds, alt)]\n",
+    ),
+    "small_vessels": (
+        "    preds = predict(test, catalog)\n",
+        "    preds = predict(test, catalog)\n"
+        "    # probe: only rows whose recorded tonnage is under 500 (no train target is that small)\n"
+        "    ton = [np.fmax(vlib.positive_float(a), vlib.positive_float(b)) for a, b in zip(test[\"gross_tonnage\"], test[\"international_gross_tonnage\"])]\n"
+        f"    preds = [p if (np.isfinite(t) and t < 500) else {DUMMY!r} for t, p in zip(ton, preds)]\n",
     ),
     "nolookup": (
         "    preds = [vlib.lookup_prediction(tables, row) for row in rows]\n",
